@@ -85,7 +85,9 @@ async def test_ingest_writeup_from_content_rejects_empty(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_process_writeup_job_completes_with_dedup(monkeypatch):
-    """The job extracts tricks, persists, and re-runs dedup (re-renders output)."""
+    """The job extracts tricks, persists, re-dedups, embeds, and rebuilds BM25."""
+    from unittest.mock import AsyncMock, patch
+
     from src.api import routes
 
     extracted = [Trick(technique_name="xss", title="Stored XSS", description="d")]
@@ -99,17 +101,26 @@ async def test_process_writeup_job_completes_with_dedup(monkeypatch):
         return [Path("output/xss.md")]
 
     monkeypatch.setattr(routes, "_url_ingestion_jobs", {})
-    monkeypatch.setattr(
-        "src.ingestion.ingest_writeup_from_content_async", fake_ingest
-    )
-    monkeypatch.setattr(
-        "src.summarization.deduplicator.run_deduplication", fake_dedup
-    )
+    monkeypatch.setattr("src.ingestion.ingest_writeup_from_content_async", fake_ingest)
+    monkeypatch.setattr("src.summarization.deduplicator.run_deduplication", fake_dedup)
+    monkeypatch.setattr("src.retrieval.index.load_or_build_index.cache_clear", lambda: None)
 
-    job_id = "job1"
-    await routes._process_writeup_job(job_id, content="some writeup content")
+    with patch("src.embedding.engine.EmbeddingEngine") as MockEngine:
+        instance = MockEngine.return_value
+        instance.generate_all = AsyncMock(return_value={"chunks": 5, "status": "completed"})
+
+        with patch("src.retrieval.bm25_index.BM25Index") as MockBM25:
+            bm25_instance = MockBM25.return_value
+            bm25_instance.build_from_output_dir.return_value = bm25_instance
+            bm25_instance.chunks = [1, 2, 3]
+
+            job_id = "job1"
+            await routes._process_writeup_job(job_id, content="some writeup content")
+
     job = routes._url_ingestion_jobs[job_id]
     assert job["status"] == "completed"
     assert job["total"] == 1
     assert job["dedup_wrote"] == 1
+    assert job["embed_chunks"] == 5
+    assert job["bm25_chunks"] == 3
     assert calls["persist"] is True

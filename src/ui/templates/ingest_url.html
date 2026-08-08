@@ -8,14 +8,17 @@
 
     <div class="controls" style="margin-bottom:0.8rem">
         <label><input type="radio" name="mode" value="url" checked onchange="setMode('url')"> From URL</label>
-        <label><input type="radio" name="mode" value="content" onchange="setMode('content')"> Paste content</label>
+        <label><input type="radio" name="mode" value="file" onchange="setMode('file')"> Upload file</label>
     </div>
 
     <form id="add-form" onsubmit="addWriteup(event)">
         <div id="url-block" style="display:flex; flex:1; gap:0.6rem">
             <input type="text" id="url-input" placeholder="https://example.com/ctf-writeup" style="flex:1">
         </div>
-        <textarea id="content-input" rows="12" placeholder="Paste the writeup markdown/text here…" style="display:none; width:100%"></textarea>
+        <div id="file-block" style="display:none">
+            <input type="file" id="file-input" accept=".md,.txt,text/markdown" style="margin-bottom:0.4rem">
+            <div id="file-name" class="muted"></div>
+        </div>
 
         <div style="display:flex; gap:0.6rem; margin-top:0.6rem">
             <input type="text" id="title-input" placeholder="Challenge title (optional)" style="flex:1">
@@ -32,12 +35,19 @@
         <p>No writeup added yet.</p>
     </div>
 </section>
+
+<section class="card">
+    <h2>Search index</h2>
+    <p class="muted">After adding writeups, rebuild the BM25 keyword index so new tricks are searchable (fast — no embedding).</p>
+    <button class="btn btn-start" onclick="rebuildIndex(event)">Rebuild BM25 index</button>
+    <div id="index-status" style="margin-top:0.6rem"></div>
+</section>
 {% endblock %}
 {% block scripts %}
 <script>
 function setMode(mode) {
     document.getElementById('url-block').style.display = mode === 'url' ? 'flex' : 'none';
-    document.getElementById('content-input').style.display = mode === 'content' ? 'block' : 'none';
+    document.getElementById('file-block').style.display = mode === 'file' ? 'block' : 'none';
 }
 
 function getMode() {
@@ -45,18 +55,32 @@ function getMode() {
     return el ? el.value : 'url';
 }
 
+document.getElementById('file-input').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    document.getElementById('file-name').textContent = f ? `Selected: ${f.name} (${(f.size/1024).toFixed(0)} KB)` : '';
+});
+
 async function addWriteup(ev) {
     ev.preventDefault();
     const mode = getMode();
     const url = document.getElementById('url-input').value.trim();
-    const content = document.getElementById('content-input').value.trim();
     const title = document.getElementById('title-input').value.trim();
     const source = document.getElementById('source-input').value.trim();
     const statusEl = document.getElementById('ingest-status');
     const resultEl = document.getElementById('result');
 
-    if ((mode === 'url' && !url) || (mode === 'content' && !content)) {
-        statusEl.innerHTML = '<p class="error">Provide a URL or pasted content.</p>';
+    let content = '';
+    if (mode === 'file') {
+        const file = document.getElementById('file-input').files[0];
+        if (!file) {
+            statusEl.innerHTML = '<p class="error">Choose a file to upload.</p>';
+            return;
+        }
+        content = await file.text();
+    }
+
+    if (!url && !content) {
+        statusEl.innerHTML = '<p class="error">Provide a URL or choose a file.</p>';
         return;
     }
 
@@ -97,9 +121,10 @@ async function pollIngest(jobId, statusEl, resultEl) {
     }
 
     const tricks = data.tricks || [];
-    statusEl.innerHTML = `<p>Done. Extracted <strong>${data.total || tricks.length}</strong> trick(s) and re-deduped ` +
-        `<strong>${data.dedup_wrote || 0}</strong> output technique files. ` +
-        `Run <code>nekozuki embed --force</code> to refresh the search index.</p>`;
+    statusEl.innerHTML = `<p>Done. Extracted <strong>${data.total || tricks.length}</strong> trick(s), re-deduped ` +
+        `<strong>${data.dedup_wrote || 0}</strong> output files, embedded ` +
+        `<strong>${data.embed_chunks || 0}</strong> chunks into Chroma, and rebuilt BM25 ` +
+        `(<strong>${data.bm25_chunks || 0}</strong> chunks). Search is ready.</p>`;
 
     if (!tricks.length) {
         resultEl.innerHTML = '<p>No tricks extracted from this writeup.</p>';
@@ -117,6 +142,37 @@ async function pollIngest(jobId, statusEl, resultEl) {
             ${t.key_code ? `<pre><code>${escapeHtml(t.key_code)}</code></pre>` : ''}
             ${t.example ? `<p><strong>Example:</strong> <code>${escapeHtml(t.example)}</code></p>` : ''}
         </div>`).join('');
+}
+
+async function rebuildIndex(ev) {
+    const statusEl = document.getElementById('index-status');
+    statusEl.innerHTML = '<p>Rebuilding BM25 index…</p>';
+    try {
+        const resp = await fetch('/api/build-index', {method: 'POST'});
+        const data = await resp.json();
+        if (data.status === 'queued') {
+            pollIndex(data.job_id, statusEl);
+        } else {
+            statusEl.innerHTML = `<p class="error">${escapeHtml(data.detail || 'unknown')}</p>`;
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<p class="error">Index rebuild failed: ${escapeHtml(e)}</p>`;
+    }
+}
+
+async function pollIndex(jobId, statusEl) {
+    const resp = await fetch(`/api/build-index/status/${jobId}`);
+    const data = await resp.json();
+    if (data.status === 'queued') {
+        setTimeout(() => pollIndex(jobId, statusEl), 1000);
+        return;
+    }
+    if (data.status === 'failed') {
+        statusEl.innerHTML = `<p class="error">Index rebuild failed: ${escapeHtml(data.error)}</p>`;
+        return;
+    }
+    statusEl.innerHTML = `<p>Done. Indexed <strong>${data.chunks}</strong> chunks. ` +
+        `RAG search will use the new BM25 index immediately.</p>`;
 }
 
 function escapeHtml(str) {

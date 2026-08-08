@@ -641,7 +641,8 @@ async def _process_writeup_job(
     source: str = "",
 ) -> None:
     """Extract tricks from a writeup (URL or pasted content), persist them to
-    the pipeline, then re-run deduplication to re-render the output files.
+    the pipeline, re-dedup to re-render output, then incrementally embed the
+    changed chunks and rebuild the BM25 index so new tricks are searchable.
 
     Runs as a background task; progress is polled via
     ``GET /api/writeup/ingest-status/{job_id}``.
@@ -662,16 +663,44 @@ async def _process_writeup_job(
 
             tricks = await ingest_writeup_from_url_async(url, persist=True)
 
-        # Complete the pipeline: re-dedup + re-render output/*.md so the new
-        # tricks show up (dedup is CPU-bound, so run it off the event loop).
+        # 1. Re-dedup + re-render output/*.md (CPU-bound, run off the loop).
         from src.summarization.deduplicator import run_deduplication
 
         written = await asyncio.to_thread(run_deduplication)
+
+        # 2. Incrementally embed changed chunks into Chroma (hash-based diff).
+        embed = {}
+        try:
+            from src.embedding.engine import EmbeddingEngine
+
+            engine = EmbeddingEngine()
+            embed = await engine.generate_all(force_reset=False)
+        except ValueError as e:
+            logger.warning("Skipping incremental embed (no embedding key): %s", e)
+        except Exception as e:  # noqa: BLE001 (embed is best-effort; keep BM25)
+            logger.warning("Incremental embed failed (%s); continuing with BM25", e)
+
+        # 3. Rebuild the BM25 keyword index from the (re-rendered) output.
+        from src.retrieval.bm25_index import BM25Index
+
+        bm25 = BM25Index()
+        built = await asyncio.to_thread(bm25.build_from_output_dir, force=True)
+        bm25_chunks = len(built.chunks) if built is not None else 0
+
+        # 4. Evict the running server's cached searcher so queries use the new index.
+        try:
+            from src.retrieval.index import load_or_build_index
+            load_or_build_index.cache_clear()
+        except Exception:  # cache eviction is best-effort
+            logger.warning("Failed to clear HybridSearcher cache", exc_info=True)
+
         _url_ingestion_jobs[job_id] = {
             "status": "completed",
             "tricks": [t.model_dump() for t in tricks],
             "total": len(tricks),
             "dedup_wrote": len(written),
+            "embed_chunks": int(embed.get("chunks", 0)),
+            "bm25_chunks": bm25_chunks,
         }
     except Exception as e:
         logger.exception("Writeup ingestion failed: %s", e)  # noqa: TRY401
@@ -730,6 +759,74 @@ async def get_ingest_status(job_id: str) -> dict:
     if job_id not in _url_ingestion_jobs:
         raise HTTPException(status_code=404, detail="Ingestion job not found")
     return _url_ingestion_jobs[job_id]
+
+
+# ---- BM25 index rebuild (background) ----
+
+_build_index_jobs: dict[str, dict] = {}
+
+
+async def _run_build_index_job(job_id: str, force: bool) -> None:
+    """Split output/*.md into chunks and rebuild the tantivy BM25 index.
+
+    Runs off the event loop (BM25 indexing is CPU-bound). Afterward the running
+    server's cached ``HybridSearcher`` is evicted so the next query loads the
+    fresh index (no restart needed).
+    """
+    try:
+        from src.retrieval.bm25_index import BM25Index
+
+        bm25 = BM25Index()
+        built = await asyncio.to_thread(bm25.build_from_output_dir, force=force)
+        if built is None:
+            _build_index_jobs[job_id] = {
+                "status": "failed",
+                "error": "No technique files found in output/",
+            }
+            return
+
+        # Evict the process-level searcher cache so queries use the new index.
+        try:
+            from src.retrieval.index import load_or_build_index
+            load_or_build_index.cache_clear()
+            logger.info("Cleared HybridSearcher cache after BM25 rebuild")
+        except Exception:  # cache eviction is best-effort
+            logger.warning("Failed to clear HybridSearcher cache", exc_info=True)
+
+        _build_index_jobs[job_id] = {
+            "status": "completed",
+            "chunks": len(built.chunks),
+            "index_path": str(built.index_path),
+        }
+    except Exception as e:
+        logger.exception("BM25 index rebuild failed: %s", e)  # noqa: TRY401
+        _build_index_jobs[job_id] = {"status": "failed", "error": str(e)}
+
+
+@router.post("/build-index")
+async def build_index(force: bool = True) -> dict:
+    """Rebuild the BM25 search index from output/*.md, as a background job.
+
+    Splits every technique file into chunks and rebuilds the tantivy BM25
+    index. Much faster than ``nekozuki embed`` (no embedding/Chroma/question
+    generation). The running server's cached searcher is refreshed
+    automatically. Returns a job ID pollable via
+    ``GET /api/build-index/status/{job_id}``.
+    """
+    import uuid
+
+    job_id = str(uuid.uuid4())
+    _build_index_jobs[job_id] = {"status": "queued", "force": force}
+    asyncio.create_task(_run_build_index_job(job_id, force))
+    return {"job_id": job_id, "status": "queued", "force": force}
+
+
+@router.get("/build-index/status/{job_id}")
+async def build_index_status(job_id: str) -> dict:
+    """Get the status of a BM25 index rebuild job."""
+    if job_id not in _build_index_jobs:
+        raise HTTPException(status_code=404, detail="Build-index job not found")
+    return _build_index_jobs[job_id]
 
 
 # ---- Embedding pipeline preview (extract → split → questions) ----
