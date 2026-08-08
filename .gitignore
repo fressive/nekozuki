@@ -1,0 +1,42 @@
+# --- Environment / secrets ---
+# .env.example IS committed (the template); .env holds real API keys.
+.env
+.env.local
+.env.*.local
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.so
+.venv/
+venv/
+build/
+dist/
+
+# --- Nekozuki data & generated artifacts ---
+# All JSON files (writeup corpora, exports, configs) and every data/output/
+# backup tree (chroma, vectors, processed, tricks, dedup backups, alt runs).
+# (No trailing slash so the prefix also matches not-yet-existing alt dirs.)
+*.json
+data*
+output*
+backups*
+
+# Generated report files.
+missing_writeups.txt
+
+# --- Test / lint caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- IDE / editor / OS ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

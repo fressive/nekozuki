@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Embed Pipeline Preview{% endblock %}
+{% block content %}
+<h1>Embed Pipeline Preview</h1>
+
+<section class="card">
+    <p>Upload a writeup to preview the full embedding pipeline: LLM trick extraction → technique-file formatting → chunk splitting → preset-question generation. Nothing is persisted.</p>
+    <form id="embed-form" onsubmit="runEmbedPreview(event)">
+        <input type="file" name="file" accept=".md,.markdown,.txt" required>
+        <button type="submit" class="btn btn-start">Run Pipeline Preview</button>
+    </form>
+    <div id="status"></div>
+</section>
+
+<section class="card">
+    <h2>1 · Extracted Tricks</h2>
+    <div id="tricks"><p>No preview yet.</p></div>
+</section>
+
+<section class="card">
+    <h2>2 · Technique File (input to splitter)</h2>
+    <pre id="technique-md" class="markdown-view muted">—</pre>
+</section>
+
+<section class="card">
+    <h2>3 · Chunks (splitter output)</h2>
+    <div id="chunks"><p>No chunks yet.</p></div>
+</section>
+
+<section class="card">
+    <h2>4 · Preset Questions</h2>
+    <div id="questions"><p>No questions yet.</p></div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+async function runEmbedPreview(ev) {
+    ev.preventDefault();
+    const form = ev.target;
+    const formData = new FormData(form);
+    const statusEl = document.getElementById('status');
+
+    statusEl.innerHTML = '<p>Running pipeline preview...</p>';
+    ['tricks','chunks','questions'].forEach(id => {
+        document.getElementById(id).innerHTML = '<p>Processing...</p>';
+    });
+    document.getElementById('technique-md').textContent = 'Processing...';
+
+    try {
+        const resp = await fetch('/api/embed/preview', {method: 'POST', body: formData});
+        const data = await resp.json();
+        if (data.status === 'processing') {
+            statusEl.innerHTML = `<p>Job ${data.job_id} submitted. Polling...</p>`;
+            poll(data.job_id);
+        } else {
+            statusEl.innerHTML = `<p class="error">Error: ${data.detail || 'unknown'}</p>`;
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<p class="error">Preview failed: ${e}</p>`;
+    }
+}
+
+async function poll(jobId) {
+    const resp = await fetch(`/api/embed/preview/${jobId}`);
+    const data = await resp.json();
+    if (data.status === 'processing') {
+        setTimeout(() => poll(jobId), 1500);
+        return;
+    }
+    if (data.status === 'failed') {
+        document.getElementById('status').innerHTML =
+            `<p class="error">Preview failed: ${data.error}</p>`;
+        return;
+    }
+
+    document.getElementById('status').innerHTML =
+        `<p>Done. ${data.tricks.length} trick(s), ${data.chunks.length} chunk(s), ${data.questions.length} question(s).</p>`;
+
+    // 1 · Tricks
+    const tricksEl = document.getElementById('tricks');
+    if (!data.tricks.length) {
+        tricksEl.innerHTML = '<p>No tricks extracted.</p>';
+    } else {
+        tricksEl.innerHTML = data.tricks.map(t => `
+            <div class="trick">
+                <h3>${escapeHtml(t.title || '(untitled)')}</h3>
+                <p class="tag">${escapeHtml(t.technique_name || '')} · ${escapeHtml(t.category || '')} · conf ${Math.round((t.confidence||0)*100)}%</p>
+                <p>${escapeHtml(t.description || '')}</p>
+                ${t.key_code ? `<pre><code>${escapeHtml(t.key_code)}</code></pre>` : ''}
+            </div>`).join('');
+    }
+
+    // 2 · Technique file
+    document.getElementById('technique-md').textContent = data.technique_md || '';
+
+    // 3 · Chunks
+    const chunksEl = document.getElementById('chunks');
+    if (!data.chunks.length) {
+        chunksEl.innerHTML = '<p>No chunks produced.</p>';
+    } else {
+        chunksEl.innerHTML = data.chunks.map(c => `
+            <div class="trick">
+                <h3>${escapeHtml(c.section_title)} <span class="muted">(${c.token_count} tok)</span></h3>
+                <pre class="md-text">${escapeHtml(c.content)}</pre>
+            </div>`).join('');
+    }
+
+    // 4 · Questions
+    const qEl = document.getElementById('questions');
+    if (!data.questions.length) {
+        qEl.innerHTML = '<p>No questions generated.</p>';
+    } else {
+        qEl.innerHTML = '<ul>' + data.questions.map(q => `<li>${escapeHtml(q)}</li>`).join('') + '</ul>';
+    }
+}
+
+function escapeHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+{% endblock %}

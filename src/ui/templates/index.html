@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<section class="card">
+    <h2>Pipeline Status</h2>
+    <div id="pipeline-status" hx-get="/api/summarize/status" hx-trigger="load, every 3s">
+        <p>Loading status...</p>
+    </div>
+</section>
+
+<section class="card">
+    <h2>Technique Files</h2>
+    <button class="btn" hx-get="/api/techniques" hx-target="#technique-list" hx-swap="innerHTML">
+        Refresh
+    </button>
+    <div id="technique-list" hx-get="/api/techniques" hx-trigger="load">
+        <p>Loading techniques...</p>
+    </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+function renderStatus(data) {
+    const el = document.getElementById('pipeline-status');
+    const pct = data.progress_pct;
+    const statusColor = {
+        'running': '#4caf50',
+        'paused': '#ff9800',
+        'completed': '#2196f3',
+        'failed': '#f44336',
+    }[data.status] || '#999';
+    el.innerHTML = `
+        <div class="progress-bar"><div class="progress-fill" style="width:${pct}%; background:${statusColor}"></div></div>
+        <p><strong>Status:</strong> ${data.status} <span style="color:${statusColor}">●</span></p>
+        <p><strong>Batch:</strong> ${data.batch_index}/${data.total_batches}</p>
+        <p><strong>Tricks extracted:</strong> ${data.tricks_extracted}</p>
+        <p><strong>Tokens used:</strong> ${data.tokens_used.toLocaleString()}</p>
+    `;
+}
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    if (evt.detail.xhr.responseURL.includes('/api/summarize/status')) {
+        try { renderStatus(JSON.parse(evt.detail.xhr.response)); } catch(e) {}
+    }
+    if (evt.detail.xhr.responseURL.includes('/api/techniques')) {
+        const el = document.getElementById('technique-list');
+        const data = JSON.parse(evt.detail.xhr.response);
+        if (data.techniques.length === 0) {
+            el.innerHTML = '<p>No technique files yet. Run <code>nekozuki summarize</code>.</p>';
+            return;
+        }
+        el.innerHTML = `
+            <table>
+                <thead><tr><th>Technique</th><th>Tricks</th><th>Size</th></tr></thead>
+                <tbody>
+                ${data.techniques.map(t => `
+                    <tr>
+                        <td><a href="/search?q=${encodeURIComponent(t.name)}">${t.name}</a></td>
+                        <td>${t.tricks}</td>
+                        <td>${(t.size_bytes/1024).toFixed(1)} KB</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>`;
+    }
+});
+</script>
+{% endblock %}

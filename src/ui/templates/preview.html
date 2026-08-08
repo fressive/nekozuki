@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Upload Preview{% endblock %}
+{% block content %}
+<h1>Upload Writeup for Preview</h1>
+
+<section class="card">
+    <p>Upload a markdown writeup to preview what tricks the summarizer would extract from it.</p>
+    <form id="upload-form" onsubmit="uploadWriteup(event)">
+        <input type="file" name="file" accept=".md,.markdown,.txt" required>
+        <button type="submit" class="btn btn-start">Upload & Analyze</button>
+    </form>
+    <div id="upload-status"></div>
+</section>
+
+<section class="card">
+    <h2>Extracted Tricks</h2>
+    <div id="preview-results">
+        <p>No preview yet.</p>
+    </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+async function uploadWriteup(ev) {
+    ev.preventDefault();
+    const form = ev.target;
+    const formData = new FormData(form);
+    const statusEl = document.getElementById('upload-status');
+    const resultsEl = document.getElementById('preview-results');
+
+    statusEl.innerHTML = '<p>Uploading...</p>';
+    resultsEl.innerHTML = '<p>Processing writeup...</p>';
+
+    try {
+        const resp = await fetch('/api/summarize/upload', {method: 'POST', body: formData});
+        const data = await resp.json();
+        if (data.status === 'processing') {
+            statusEl.innerHTML = `<p>Job ${data.job_id} submitted. Polling for result...</p>`;
+            pollPreview(data.job_id, resultsEl);
+        } else {
+            statusEl.innerHTML = `<p>Error: ${data.detail || 'unknown'}</p>`;
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<p>Upload failed: ${e}</p>`;
+    }
+}
+
+async function pollPreview(jobId, resultsEl) {
+    const resp = await fetch(`/api/summarize/preview/${jobId}`);
+    const data = await resp.json();
+    if (data.status === 'processing') {
+        setTimeout(() => pollPreview(jobId, resultsEl), 1500);
+        return;
+    }
+    if (data.status === 'failed') {
+        resultsEl.innerHTML = `<p class="error">Preview failed: ${data.error}</p>`;
+        return;
+    }
+
+    const tricks = data.tricks;
+    if (!tricks || tricks.length === 0) {
+        resultsEl.innerHTML = '<p>No tricks extracted from this writeup.</p>';
+        return;
+    }
+
+    resultsEl.innerHTML = tricks.map(t => `
+        <div class="trick">
+            <h3>${t.title || '(untitled)'}</h3>
+            <p class="tag">${t.technique_name || ''} · ${t.category || ''} · conf ${(t.confidence*100).toFixed(0)}%</p>
+            <p>${t.description || ''}</p>
+            ${t.conditions && t.conditions.length ? `<p><strong>Conditions:</strong> ${t.conditions.join('; ')}</p>` : ''}
+            ${t.implementation_steps && t.implementation_steps.length ? `
+                <p><strong>Steps:</strong></p><ol>${t.implementation_steps.map(s => `<li>${s}</li>`).join('')}</ol>` : ''}
+            ${t.key_code ? `<pre><code>${escapeHtml(t.key_code)}</code></pre>` : ''}
+            ${t.example ? `<p><strong>Example:</strong> <code>${escapeHtml(t.example)}</code></p>` : ''}
+        </div>`).join('');
+}
+
+function escapeHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+{% endblock %}

@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.title if detail else 'Not Found' }} — Trick{% endblock %}
+{% block content %}
+{% if not detail %}
+    <h1>Trick not found</h1>
+    <p class="error">{{ error or 'No trick with this id.' }}</p>
+    <p><a href="/search">← Back to search</a></p>
+{% else %}
+    <h1>{{ detail.title }}</h1>
+    <p class="muted">
+        Technique:
+        <a href="/technique/{{ detail.technique_name }}" class="result-technique">{{ detail.technique_name }}</a>
+        · id <code>{{ detail.id }}</code>
+        · <a href="/search">← back to search</a>
+    </p>
+
+    {% if detail.description %}
+    <section class="card">
+        <h2>Description</h2>
+        <p>{{ detail.description }}</p>
+    </section>
+    {% endif %}
+
+    {% if detail.conditions %}
+    <section class="card">
+        <h2>Conditions</h2>
+        <ul>{% for c in detail.conditions %}<li>{{ c }}</li>{% endfor %}</ul>
+    </section>
+    {% endif %}
+
+    {% if detail.implementation_steps %}
+    <section class="card">
+        <h2>Implementation</h2>
+        <ol>{% for s in detail.implementation_steps %}<li>{{ s }}</li>{% endfor %}</ol>
+    </section>
+    {% endif %}
+
+    {% if detail.key_code %}
+    <section class="card">
+        <h2>Key code / payload</h2>
+        <pre><code>{{ detail.key_code }}</code></pre>
+    </section>
+    {% endif %}
+
+    {% if detail.example %}
+    <section class="card">
+        <h2>Example</h2>
+        <pre><code>{{ detail.example }}</code></pre>
+    </section>
+    {% endif %}
+
+    {% if detail.detection_signs %}
+    <section class="card">
+        <h2>Detection signs</h2>
+        <ul>{% for s in detail.detection_signs %}<li>{{ s }}</li>{% endfor %}</ul>
+    </section>
+    {% endif %}
+
+    {% if detail.example_challenge %}
+    <p class="muted">Example challenge: {{ detail.example_challenge }}</p>
+    {% endif %}
+
+    {% if detail.source_writeups %}
+    <section class="card">
+        <h2>Source writeups ({{ detail.source_writeups|length }})</h2>
+        <ul>
+            {% for u in detail.source_writeups %}
+            <li><a href="{{ u }}" target="_blank" rel="noopener">{{ u }}</a></li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% endif %}
+{% endif %}
+{% endblock %}

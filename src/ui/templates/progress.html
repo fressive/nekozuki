@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Summarize Progress{% endblock %}
+{% block content %}
+<h1>Summarization Progress</h1>
+
+<section class="card">
+    <div class="controls">
+        <button class="btn btn-start" id="btn-start" onclick="startSummarize()">Start / Resume</button>
+        <button class="btn btn-pause" id="btn-pause" onclick="pauseSummarize()">Pause</button>
+    </div>
+</section>
+
+<section class="card">
+    <h2>Live Progress</h2>
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+    <p id="progress-text">Waiting to start...</p>
+    <div id="log" class="log"></div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+let es = null;
+
+function connectStream() {
+    if (es) es.close();
+    es = new EventSource('/api/summarize/stream');
+    es.addEventListener('progress', (ev) => {
+        const data = JSON.parse(ev.data);
+        updateUI(data);
+    });
+    es.onerror = () => { /* EventSource auto-reconnects */ };
+}
+
+function updateUI(data) {
+    const pct = data.progress_pct || 0;
+    document.getElementById('progress-fill').style.width = pct + '%';
+    const statusColor = {running:'#4caf50',paused:'#ff9800',completed:'#2196f3',failed:'#f44336'}[data.status] || '#999';
+    document.getElementById('progress-fill').style.background = statusColor;
+    document.getElementById('progress-text').innerHTML =
+        `<strong>Status:</strong> ${data.status} | <strong>Batch:</strong> ${data.batch_index}/${data.total_batches} | ` +
+        `<strong>Tricks:</strong> ${data.tricks_extracted} | <strong>Tokens:</strong> ${data.tokens_used.toLocaleString()} | ` +
+        `<strong>${pct}%</strong>`;
+    if (data.message) {
+        appendLog(data.message);
+    }
+    if (data.status === 'completed' || data.status === 'failed') {
+        appendLog('=== ' + data.status.toUpperCase() + ' ===');
+        if (es) { es.close(); es = null; }
+    }
+}
+
+function appendLog(msg) {
+    const el = document.getElementById('log');
+    const line = document.createElement('div');
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    el.prepend(line);
+}
+
+async function startSummarize() {
+    appendLog('Starting / resuming...');
+    await fetch('/api/summarize/start', {method: 'POST'});
+    connectStream();
+}
+
+async function pauseSummarize() {
+    appendLog('Pausing...');
+    await fetch('/api/summarize/pause', {method: 'POST'});
+}
+
+// Connect on page load if a run is in progress
+fetch('/api/summarize/status').then(r => r.json()).then(s => {
+    if (s.is_running || s.status === 'running') connectStream();
+});
+</script>
+{% endblock %}

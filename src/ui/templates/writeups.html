@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Writeup Tricks{% endblock %}
+{% block content %}
+<h1>Writeup → Trick Lookup</h1>
+
+<section class="card">
+    <p>Search writeups by challenge name, then view the tricks extracted from each one.</p>
+    <form onsubmit="searchWriteups(event)">
+        <input type="text" id="q" placeholder="Challenge name or CTF name" style="flex:1">
+        <button type="submit" class="btn btn-start">Search</button>
+    </form>
+    <div id="search-status" class="muted" style="margin-top:0.4rem"></div>
+</section>
+
+<section class="card" id="writeup-list" style="display:none">
+    <h2>Writeups</h2>
+    <div id="writeup-results"></div>
+</section>
+
+<section class="card" id="trick-detail" style="display:none">
+    <h2 id="trick-detail-title">Tricks</h2>
+    <div id="trick-detail-content"></div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+let writeupMeta = null; // cached writeup metadata
+
+async function searchWriteups(ev) {
+    ev.preventDefault();
+    const q = document.getElementById('q').value.trim();
+    if (!q) return;
+    const statusEl = document.getElementById('search-status');
+    const listEl = document.getElementById('writeup-list');
+    const resultsEl = document.getElementById('writeup-results');
+    const detailEl = document.getElementById('trick-detail');
+
+    statusEl.textContent = 'Searching...';
+    listEl.style.display = 'none';
+    detailEl.style.display = 'none';
+
+    const resp = await fetch(`/api/writeups/search?q=${encodeURIComponent(q)}&limit=50`);
+    const data = await resp.json();
+    statusEl.textContent = `${data.total} writeups found`;
+
+    if (data.results.length === 0) {
+        resultsEl.innerHTML = '<p>No writeups matched.</p>';
+        listEl.style.display = 'block';
+        return;
+    }
+
+    resultsEl.innerHTML = '<table><thead><tr><th>Challenge</th><th>CTF</th><th>Tricks</th></tr></thead><tbody>' +
+        data.results.map(r => {
+            const link = r.trick_count > 0
+                ? `<a href="#" onclick="showTricks('${escapeHtml(r.url)}');return false">${escapeHtml(r.title)}</a>`
+                : `<span class="muted">${escapeHtml(r.title)}</span>`;
+            return `<tr>
+            <td>${link}</td>
+            <td>${escapeHtml(r.source)}</td>
+            <td>${r.trick_count > 0 ? r.trick_count : '<span class="muted">—</span>'}</td>
+        </tr>`}).join('') + '</tbody></table>';
+    listEl.style.display = 'block';
+}
+
+async function showTricks(url) {
+    const detailEl = document.getElementById('trick-detail');
+    const titleEl = document.getElementById('trick-detail-title');
+    const contentEl = document.getElementById('trick-detail-content');
+
+    detailEl.style.display = 'none';
+    titleEl.textContent = 'Loading...';
+
+    const resp = await fetch(`/api/writeup/tricks?url=${encodeURIComponent(url)}`);
+    const data = await resp.json();
+    titleEl.textContent = `Tricks: ${escapeHtml(data.challenge_title)} (${escapeHtml(data.challenge_source)})`;
+
+    if (data.tricks.length === 0) {
+        contentEl.innerHTML = '<p class="muted">No tricks were extracted from this writeup — it may not have been in a successfully processed batch. Run <code>nekozuki summarize</code> to (re)process it.</p>';
+        detailEl.style.display = 'block';
+        return;
+    }
+
+    contentEl.innerHTML = data.tricks.map(t => `
+        <div class="trick">
+            <h3>${escapeHtml(t.title)}</h3>
+            <p class="tag">${escapeHtml(t.technique_name)} · ${escapeHtml(t.category)} · conf ${(t.confidence*100).toFixed(0)}%</p>
+            <p>${escapeHtml(t.description)}</p>
+            ${t.key_code ? `<pre><code>${escapeHtml(t.key_code)}</code></pre>` : ''}
+            ${t.example ? `<p><strong>Example:</strong> <code>${escapeHtml(t.example)}</code></p>` : ''}
+        </div>`).join('');
+    detailEl.style.display = 'block';
+    detailEl.scrollIntoView({behavior: 'smooth'});
+}
+
+function escapeHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+{% endblock %}

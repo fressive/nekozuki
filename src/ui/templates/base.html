@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Nekozuki{% endblock %} — Nekozuki</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <a href="/" class="brand">🐱 Nekozuki</a>
+        <div class="nav-links">
+            <a href="/">Dashboard</a>
+            <a href="/progress">Summarize</a>
+            <a href="/preview">Upload Preview</a>
+            <a href="/embed-preview">Embed Preview</a>
+            <a href="/ingest-url">From URL</a>
+            <a href="/search">Search</a>
+            <a href="/writeups">Writeups</a>
+        </div>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Search Techniques{% endblock %}
+{% block content %}
+<h1>Technique Search</h1>
+
+<section class="card">
+    <form onsubmit="runQuickSearch(event)">
+        <input type="text" id="query" placeholder="e.g. ssti flask secret key, tcache poisoning, sql injection bypass" value="{{ request.query_params.get('q', '') }}" style="flex:1">
+        <label for="limit" class="muted">Results</label>
+        <input type="number" id="limit" value="20" min="1" max="100" title="Number of results" style="width:70px">
+        <button type="submit" class="btn btn-start">Quick search</button>
+        <button type="button" class="btn" onclick="runRagSearch(event)" title="Slow semantic search (rerank, ~5s)">RAG deep search</button>
+    </form>
+    <p id="search-time" class="muted"></p>
+</section>
+
+<section class="card">
+    <div id="results">
+        <p>Quick search scans trick titles + descriptions (fast, ~50 ms). Click a result to open its full detail.</p>
+    </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+function escapeHtml(text) {
+    return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function query() {
+    return document.getElementById('query').value.trim();
+}
+function limit() {
+    return parseInt(document.getElementById('limit').value, 10) || 20;
+}
+function setResults(html, timeMs, msg) {
+    document.getElementById('results').innerHTML = html;
+    document.getElementById('search-time').textContent = timeMs ? `Search answered in ${timeMs.toFixed(0)} ms${msg ? ' · ' + msg : ''}` : '';
+}
+
+async function runQuickSearch(ev) {
+    ev.preventDefault();
+    const q = query();
+    if (!q) return;
+    setResults('<p>Searching...</p>', 0);
+    const start = performance.now();
+    try {
+        const resp = await fetch(`/api/tricks/search?q=${encodeURIComponent(q)}&limit=${limit()}`);
+        if (!resp.ok) {
+            const err = await resp.json();
+            setResults(`<p class="error">${escapeHtml(err.detail || resp.statusText)}</p>`, 0);
+            return;
+        }
+        const data = await resp.json();
+        const elapsed = performance.now() - start;
+        if (data.results.length === 0) {
+            setResults('<p>No results found.</p>', elapsed);
+            return;
+        }
+        setResults(data.results.map(r => `
+            <div class="result">
+                <div class="result-header">
+                    <a href="/trick/${encodeURIComponent(r.id)}" class="result-technique">${escapeHtml(r.title)}</a>
+                    <span class="tag">${escapeHtml(r.technique_name)}</span>
+                </div>
+                <div class="result-content"><div class="md-text">${escapeHtml(r.description || '')}</div></div>
+            </div>`).join(''), elapsed, `${data.results.length} results`);
+    } catch (e) {
+        setResults(`<p class="error">Search failed: ${escapeHtml(e)}</p>`, 0);
+    }
+}
+
+async function runRagSearch(ev) {
+    const q = query();
+    if (!q) return;
+    setResults('<p>RAG search running (rerank can take a few seconds)...</p>', 0);
+    const start = performance.now();
+    try {
+        const resp = await fetch('/api/rag/query', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({query: q, top_k: limit()}),
+        });
+        if (resp.status === 503) {
+            const err = await resp.json();
+            setResults(`<p class="error">${escapeHtml(err.detail)}</p>`, 0);
+            return;
+        }
+        if (!resp.ok) {
+            const err = await resp.json();
+            setResults(`<p class="error">${escapeHtml(err.detail || resp.statusText)}</p>`, 0);
+            return;
+        }
+        const data = await resp.json();
+        const elapsed = performance.now() - start;
+        if (data.results.length === 0) {
+            setResults('<p>No results found.</p>', elapsed);
+            return;
+        }
+        setResults(data.results.map(r => `
+            <div class="result">
+                <div class="result-header">
+                    <span class="tag">#${r.rank}</span>
+                    <a href="/technique/${encodeURIComponent(r.technique_name)}" class="result-technique">${escapeHtml(r.technique_name)}</a>
+                    <span class="muted">· ${escapeHtml(r.section_title)}</span>
+                </div>
+                <div class="result-scores muted">
+                    bm25 ${r.bm25_score.toFixed(3)} · rerank ${r.rerank_score.toFixed(3)}
+                </div>
+                <div class="result-content">${renderMarkdown(r.content)}</div>
+            </div>`).join(''), elapsed, `${data.results.length} results`);
+    } catch (e) {
+        setResults(`<p class="error">Search failed: ${escapeHtml(e)}</p>`, 0);
+    }
+}
+
+// Minimal markdown-ish renderer: escape HTML, render code fences
+function renderMarkdown(text) {
+    let safe = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const parts = safe.split(/```/g);
+    if (parts.length >= 3) {
+        safe = parts.map((p, i) => i % 2 === 1 ? `<pre><code>${p}</code></pre>` : `<div class="md-text">${p}</div>`).join('');
+    } else {
+        safe = `<div class="md-text">${safe}</div>`;
+    }
+    return safe;
+}
+
+// Run search on load if a query param was provided
+window.addEventListener('DOMContentLoaded', () => {
+    const params = new URLSearchParams(window.location.search);
+    const q = document.getElementById('query').value;
+    if (q) runQuickSearch(new Event('submit'));
+});
+</script>
+{% endblock %}

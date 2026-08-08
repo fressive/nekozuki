@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Add Writeup{% endblock %}
+{% block content %}
+<h1>Add Writeup to the Pipeline</h1>
+
+<section class="card">
+    <p>Add a CTF writeup by URL or by pasting its content. The writeup is fetched/cleaned, read by the LLM to extract reusable tricks, saved to the pipeline, and the output technique files are re-deduplicated.</p>
+
+    <div class="controls" style="margin-bottom:0.8rem">
+        <label><input type="radio" name="mode" value="url" checked onchange="setMode('url')"> From URL</label>
+        <label><input type="radio" name="mode" value="content" onchange="setMode('content')"> Paste content</label>
+    </div>
+
+    <form id="add-form" onsubmit="addWriteup(event)">
+        <div id="url-block" style="display:flex; flex:1; gap:0.6rem">
+            <input type="text" id="url-input" placeholder="https://example.com/ctf-writeup" style="flex:1">
+        </div>
+        <textarea id="content-input" rows="12" placeholder="Paste the writeup markdown/text here…" style="display:none; width:100%"></textarea>
+
+        <div style="display:flex; gap:0.6rem; margin-top:0.6rem">
+            <input type="text" id="title-input" placeholder="Challenge title (optional)" style="flex:1">
+            <input type="text" id="source-input" placeholder="Source (optional)" style="flex:1">
+        </div>
+        <button type="submit" class="btn btn-start" style="margin-top:0.8rem">Extract &amp; Add</button>
+    </form>
+    <div id="ingest-status"></div>
+</section>
+
+<section class="card">
+    <h2>Extracted Tricks</h2>
+    <div id="result">
+        <p>No writeup added yet.</p>
+    </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+function setMode(mode) {
+    document.getElementById('url-block').style.display = mode === 'url' ? 'flex' : 'none';
+    document.getElementById('content-input').style.display = mode === 'content' ? 'block' : 'none';
+}
+
+function getMode() {
+    const el = document.querySelector('input[name="mode"]:checked');
+    return el ? el.value : 'url';
+}
+
+async function addWriteup(ev) {
+    ev.preventDefault();
+    const mode = getMode();
+    const url = document.getElementById('url-input').value.trim();
+    const content = document.getElementById('content-input').value.trim();
+    const title = document.getElementById('title-input').value.trim();
+    const source = document.getElementById('source-input').value.trim();
+    const statusEl = document.getElementById('ingest-status');
+    const resultEl = document.getElementById('result');
+
+    if ((mode === 'url' && !url) || (mode === 'content' && !content)) {
+        statusEl.innerHTML = '<p class="error">Provide a URL or pasted content.</p>';
+        return;
+    }
+
+    statusEl.innerHTML = '<p>Extracting tricks via the pipeline…</p>';
+    resultEl.innerHTML = '<p>Processing writeup…</p>';
+
+    try {
+        const resp = await fetch('/api/writeup/add', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url, content, challenge_title: title, challenge_source: source}),
+        });
+        const data = await resp.json();
+        if (data.status === 'queued') {
+            statusEl.innerHTML = `<p>Job ${data.job_id} submitted. Polling for result…</p>`;
+            pollIngest(data.job_id, statusEl, resultEl);
+        } else {
+            statusEl.innerHTML = `<p class="error">Error: ${escapeHtml(data.detail || 'unknown')}</p>`;
+            resultEl.innerHTML = '<p>No result.</p>';
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<p class="error">Ingestion failed: ${escapeHtml(e)}</p>`;
+    }
+}
+
+async function pollIngest(jobId, statusEl, resultEl) {
+    const resp = await fetch(`/api/writeup/ingest-status/${jobId}`);
+    const data = await resp.json();
+    if (data.status === 'queued') {
+        statusEl.innerHTML = '<p>Processing (extraction + re-dedup can take ~30s)…</p>';
+        setTimeout(() => pollIngest(jobId, statusEl, resultEl), 1500);
+        return;
+    }
+    if (data.status === 'failed') {
+        statusEl.innerHTML = `<p class="error">Ingestion failed: ${escapeHtml(data.error)}</p>`;
+        resultEl.innerHTML = '<p>No result.</p>';
+        return;
+    }
+
+    const tricks = data.tricks || [];
+    statusEl.innerHTML = `<p>Done. Extracted <strong>${data.total || tricks.length}</strong> trick(s) and re-deduped ` +
+        `<strong>${data.dedup_wrote || 0}</strong> output technique files. ` +
+        `Run <code>nekozuki embed --force</code> to refresh the search index.</p>`;
+
+    if (!tricks.length) {
+        resultEl.innerHTML = '<p>No tricks extracted from this writeup.</p>';
+        return;
+    }
+
+    resultEl.innerHTML = tricks.map(t => `
+        <div class="trick">
+            <h3>${escapeHtml(t.title || '(untitled)')}</h3>
+            <p class="tag">${escapeHtml(t.technique_name || '')} · ${escapeHtml(t.category || '')} · conf ${Math.round((t.confidence||0)*100)}%</p>
+            <p>${escapeHtml(t.description || '')}</p>
+            ${t.conditions && t.conditions.length ? `<p><strong>Conditions:</strong> ${t.conditions.map(escapeHtml).join('; ')}</p>` : ''}
+            ${t.implementation_steps && t.implementation_steps.length ? `
+                <p><strong>Steps:</strong></p><ol>${t.implementation_steps.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>` : ''}
+            ${t.key_code ? `<pre><code>${escapeHtml(t.key_code)}</code></pre>` : ''}
+            ${t.example ? `<p><strong>Example:</strong> <code>${escapeHtml(t.example)}</code></p>` : ''}
+        </div>`).join('');
+}
+
+function escapeHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+{% endblock %}

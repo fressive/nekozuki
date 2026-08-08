@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} — Technique{% endblock %}
+{% block content %}
+<h1>Technique: {{ name }}</h1>
+
+<section class="card">
+    <pre class="markdown-view">{{ content }}</pre>
+</section>
+{% endblock %}
