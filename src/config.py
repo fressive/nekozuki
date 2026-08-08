@@ -38,9 +38,9 @@ class Settings(BaseSettings):
     embedding_base_url: str = os.getenv("EMBEDDING_BASE_URL", "")
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     embedding_dimensions: int = int(os.getenv("EMBEDDING_DIMENSIONS", "512"))
-    embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "100"))
+    embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "45"))
     embedding_timeout: float = float(os.getenv("EMBEDDING_TIMEOUT", "120"))
-    embedding_max_concurrency: int = int(os.getenv("EMBEDDING_MAX_CONCURRENCY", "4"))
+    embedding_max_concurrency: int = int(os.getenv("EMBEDDING_MAX_CONCURRENCY", "8"))
 
     # Chunking
     chunk_size: int = int(os.getenv("CHUNK_SIZE", "500"))

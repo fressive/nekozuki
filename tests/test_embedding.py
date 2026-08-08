@@ -75,13 +75,13 @@ async def test_embedding_pipeline_resume(tmp_path, monkeypatch):
 
     engine = EmbeddingEngine()
 
-    result1 = await engine.generate_all()
+    result1 = await engine.generate_all(generate_questions=True)  # questions are opt-in by default
     assert result1["status"] == "completed"
     assert result1["chunks"] == 4  # 2 files, 2 sections each
 
     # Add a new technique and resume
     _write_technique_files(tmp_path, ["ssti"])
-    result2 = await engine.generate_all()
+    result2 = await engine.generate_all(generate_questions=True)
     assert result2["status"] == "completed"
     assert result2["chunks"] == 6  # accumulated: 4 + 2
 

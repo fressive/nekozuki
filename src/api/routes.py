@@ -640,11 +640,13 @@ async def _process_writeup_job(
     title: str = "",
     source: str = "",
 ) -> None:
-    """Extract tricks from a writeup (URL or pasted content), persist them to
-    the pipeline, re-dedup to re-render output, then incrementally embed the
-    changed chunks and rebuild the BM25 index so new tricks are searchable.
+    """Extract tricks from a writeup (URL or pasted content) and persist them
+    to the pipeline (tricks.jsonl / tricks_all.json).
 
-    Runs as a background task; progress is polled via
+    This intentionally does NOT re-run dedup/embed automatically — those are
+    heavy steps the user triggers when ready (e.g. ``nekozuki dedup-tricks`` /
+    the rebuild-index button), so adding a single writeup stays fast. Runs as a
+    background task; progress is polled via
     ``GET /api/writeup/ingest-status/{job_id}``.
     """
     try:
@@ -663,44 +665,10 @@ async def _process_writeup_job(
 
             tricks = await ingest_writeup_from_url_async(url, persist=True)
 
-        # 1. Re-dedup + re-render output/*.md (CPU-bound, run off the loop).
-        from src.summarization.deduplicator import run_deduplication
-
-        written = await asyncio.to_thread(run_deduplication)
-
-        # 2. Incrementally embed changed chunks into Chroma (hash-based diff).
-        embed = {}
-        try:
-            from src.embedding.engine import EmbeddingEngine
-
-            engine = EmbeddingEngine()
-            embed = await engine.generate_all(force_reset=False)
-        except ValueError as e:
-            logger.warning("Skipping incremental embed (no embedding key): %s", e)
-        except Exception as e:  # noqa: BLE001 (embed is best-effort; keep BM25)
-            logger.warning("Incremental embed failed (%s); continuing with BM25", e)
-
-        # 3. Rebuild the BM25 keyword index from the (re-rendered) output.
-        from src.retrieval.bm25_index import BM25Index
-
-        bm25 = BM25Index()
-        built = await asyncio.to_thread(bm25.build_from_output_dir, force=True)
-        bm25_chunks = len(built.chunks) if built is not None else 0
-
-        # 4. Evict the running server's cached searcher so queries use the new index.
-        try:
-            from src.retrieval.index import load_or_build_index
-            load_or_build_index.cache_clear()
-        except Exception:  # cache eviction is best-effort
-            logger.warning("Failed to clear HybridSearcher cache", exc_info=True)
-
         _url_ingestion_jobs[job_id] = {
             "status": "completed",
             "tricks": [t.model_dump() for t in tricks],
             "total": len(tricks),
-            "dedup_wrote": len(written),
-            "embed_chunks": int(embed.get("chunks", 0)),
-            "bm25_chunks": bm25_chunks,
         }
     except Exception as e:
         logger.exception("Writeup ingestion failed: %s", e)  # noqa: TRY401
@@ -712,9 +680,10 @@ async def add_writeup(request: AddWriteupRequest) -> dict:
     """Add a writeup to the pipeline: fetch a URL or accept pasted content.
 
     Runs the writeup through fetch/clean → LLM trick extraction → persist to
-    tricks.jsonl/tricks_all.json → dedup re-run (re-renders output/*.md). One of
-    ``url`` or ``content`` is required; an optional ``url`` is recorded on the
-    extracted tricks as the source link. Returns a job ID to poll.
+    tricks.jsonl/tricks_all.json. Dedup/embed are NOT run automatically (see
+    :func:`_process_writeup_job`). One of ``url`` or ``content`` is required;
+    an optional ``url`` is recorded on the extracted tricks as the source link.
+    Returns a job ID to poll.
     """
     import uuid
 
@@ -737,7 +706,7 @@ async def add_writeup(request: AddWriteupRequest) -> dict:
 
 @router.post("/writeup/from-url")
 async def ingest_writeup_from_url(url: str = "") -> dict:
-    """Fetch a writeup from a URL, extract tricks, persist, and re-run dedup.
+    """Fetch a writeup from a URL, extract tricks, and persist to the pipeline.
 
     Convenience wrapper over ``POST /api/writeup/add`` for URL-only ingestion.
     Returns a job ID pollable via GET /api/writeup/ingest-status/{job_id}.
@@ -827,6 +796,90 @@ async def build_index_status(job_id: str) -> dict:
     if job_id not in _build_index_jobs:
         raise HTTPException(status_code=404, detail="Build-index job not found")
     return _build_index_jobs[job_id]
+
+
+# ---- Full pipeline reprocess (dedup → embed → BM25), background ----
+
+_reprocess_jobs: dict[str, dict] = {}
+
+
+async def _run_reprocess_job(job_id: str, generate_questions: bool = False) -> None:
+    """Re-run the whole post-ingestion pipeline at once.
+
+    Steps: (1) re-dedup + re-render output/*.md, (2) incrementally embed the
+    changed chunks into Chroma, (3) rebuild the BM25 keyword index, (4) evict
+    the running server's cached searcher. Use after adding one or more writeups
+    via ``/api/writeup/add`` to process all accumulated tricks together instead
+    of running these heavy steps on every single add.
+    """
+    try:
+        # 1. Re-dedup + re-render output/*.md (CPU-bound, run off the loop).
+        from src.summarization.deduplicator import run_deduplication
+
+        written = await asyncio.to_thread(run_deduplication)
+
+        # 2. Incrementally embed changed chunks into Chroma (hash-based diff).
+        embed = {}
+        try:
+            from src.embedding.engine import EmbeddingEngine
+
+            engine = EmbeddingEngine()
+            embed = await engine.generate_all(
+                force_reset=False, generate_questions=generate_questions
+            )
+        except ValueError as e:
+            logger.warning("Skipping embed (no embedding key): %s", e)
+        except Exception as e:  # noqa: BLE001 (embed is best-effort; keep BM25)
+            logger.warning("Embed failed (%s); continuing with BM25", e)
+
+        # 3. Rebuild the BM25 keyword index from the re-rendered output.
+        from src.retrieval.bm25_index import BM25Index
+
+        bm25 = BM25Index()
+        built = await asyncio.to_thread(bm25.build_from_output_dir, force=True)
+        bm25_chunks = len(built.chunks) if built is not None else 0
+
+        # 4. Evict the running server's cached searcher so queries use the new index.
+        try:
+            from src.retrieval.index import load_or_build_index
+            load_or_build_index.cache_clear()
+        except Exception:  # cache eviction is best-effort
+            logger.warning("Failed to clear HybridSearcher cache", exc_info=True)
+
+        _reprocess_jobs[job_id] = {
+            "status": "completed",
+            "dedup_wrote": len(written),
+            "embed_chunks": int(embed.get("chunks", 0)),
+            "bm25_chunks": bm25_chunks,
+        }
+    except Exception as e:
+        logger.exception("Pipeline reprocess failed: %s", e)  # noqa: TRY401
+        _reprocess_jobs[job_id] = {"status": "failed", "error": str(e)}
+
+
+@router.post("/reprocess")
+async def reprocess(questions: bool = False) -> dict:
+    """Re-run the full pipeline: dedup + re-render, incremental embed, BM25 rebuild.
+
+    Use after adding one or more writeups via ``/api/writeup/add`` to process
+    all accumulated tricks at once. ``questions`` optionally enables
+    question generation/embedding (off by default). Returns a job ID polled via
+    ``GET /api/reprocess/status/{job_id}``.
+    """
+    import uuid
+
+    job_id = str(uuid.uuid4())
+    _reprocess_jobs[job_id] = {"status": "queued", "questions": questions}
+    asyncio.create_task(_run_reprocess_job(job_id, generate_questions=questions))
+    return {"job_id": job_id, "status": "queued", "questions": questions}
+
+
+@router.get("/reprocess/status/{job_id}")
+async def reprocess_status(job_id: str) -> dict:
+    """Get the status of a full-pipeline reprocess job."""
+    if job_id not in _reprocess_jobs:
+        raise HTTPException(status_code=404, detail="Reprocess job not found")
+    return _reprocess_jobs[job_id]
 
 
 # ---- Embedding pipeline preview (extract → split → questions) ----

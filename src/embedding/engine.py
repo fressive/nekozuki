@@ -109,7 +109,7 @@ class EmbeddingEngine:
         logger.info("Saved %d chunks to disk", len(chunks))
 
     async def generate_all(
-        self, force_reset: bool = False, generate_questions: bool = True
+        self, force_reset: bool = False, generate_questions: bool = False
     ) -> dict:
         """Run the embedding pipeline with per-chunk (per-trick) resume.
 
@@ -328,7 +328,7 @@ class EmbeddingEngine:
 
 async def run_embedding_pipeline(
     force_reset: bool = False,
-    generate_questions: bool = True,
+    generate_questions: bool = False,
     concurrency: int = 0,
     batch_size: int = 0,
 ) -> int:

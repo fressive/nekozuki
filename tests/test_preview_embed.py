@@ -239,7 +239,7 @@ async def test_preview_to_embed_end_to_end(tmp_path, monkeypatch):
     engine_module.AsyncOpenAI = MockAsyncOpenAI
 
     engine = EmbeddingEngine()
-    result = await engine.generate_all()
+    result = await engine.generate_all(generate_questions=True)  # questions are opt-in by default
     assert result["status"] == "completed"
     assert result["chunks"] == 3        # 2 tricks + 1 overview = 3 H2 sections
     assert result["questions"] == 1     # 1 preset question per technique file

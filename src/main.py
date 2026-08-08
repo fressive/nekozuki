@@ -209,7 +209,7 @@ def run_embed(args: argparse.Namespace) -> int:
     from src.embedding.engine import run_embedding_pipeline
     return asyncio.run(run_embedding_pipeline(
         force_reset=args.force,
-        generate_questions=not args.no_questions,
+        generate_questions=args.questions,
         concurrency=args.concurrency,
         batch_size=args.batch_size,
     ))
@@ -674,9 +674,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Ignore existing embedding checkpoint and re-embed everything",
     )
     embed_parser.add_argument(
-        "--no-questions",
+        "--questions",
         action="store_true",
-        help="Skip pre-retrieval question generation and embedding (chunks only)",
+        help="Also generate + embed pre-retrieval questions (opt-in; they power the "
+             "retrieval question-boost tiebreaker)",
     )
     embed_parser.add_argument(
         "--concurrency",

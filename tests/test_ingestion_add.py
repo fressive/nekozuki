@@ -84,10 +84,8 @@ async def test_ingest_writeup_from_content_rejects_empty(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_process_writeup_job_completes_with_dedup(monkeypatch):
-    """The job extracts tricks, persists, re-dedups, embeds, and rebuilds BM25."""
-    from unittest.mock import AsyncMock, patch
-
+async def test_process_writeup_job_persists_only(monkeypatch):
+    """The job extracts tricks and persists them — no dedup/embed auto-run."""
     from src.api import routes
 
     extracted = [Trick(technique_name="xss", title="Stored XSS", description="d")]
@@ -97,30 +95,46 @@ async def test_process_writeup_job_completes_with_dedup(monkeypatch):
         calls["persist"] = kwargs.get("persist")
         return extracted
 
-    def fake_dedup():
-        return [Path("output/xss.md")]
-
     monkeypatch.setattr(routes, "_url_ingestion_jobs", {})
     monkeypatch.setattr("src.ingestion.ingest_writeup_from_content_async", fake_ingest)
-    monkeypatch.setattr("src.summarization.deduplicator.run_deduplication", fake_dedup)
-    monkeypatch.setattr("src.retrieval.index.load_or_build_index.cache_clear", lambda: None)
 
-    with patch("src.embedding.engine.EmbeddingEngine") as MockEngine:
-        instance = MockEngine.return_value
-        instance.generate_all = AsyncMock(return_value={"chunks": 5, "status": "completed"})
-
-        with patch("src.retrieval.bm25_index.BM25Index") as MockBM25:
-            bm25_instance = MockBM25.return_value
-            bm25_instance.build_from_output_dir.return_value = bm25_instance
-            bm25_instance.chunks = [1, 2, 3]
-
-            job_id = "job1"
-            await routes._process_writeup_job(job_id, content="some writeup content")
-
+    job_id = "job1"
+    await routes._process_writeup_job(job_id, content="some writeup content")
     job = routes._url_ingestion_jobs[job_id]
     assert job["status"] == "completed"
     assert job["total"] == 1
-    assert job["dedup_wrote"] == 1
-    assert job["embed_chunks"] == 5
-    assert job["bm25_chunks"] == 3
     assert calls["persist"] is True
+    # No dedup/embed/BM25 fields — those are not auto-run.
+    assert "dedup_wrote" not in job
+    assert "embed_chunks" not in job
+    assert "bm25_chunks" not in job
+
+
+@pytest.mark.asyncio
+async def test_reprocess_job_runs_full_pipeline(monkeypatch):
+    """The reprocess job runs dedup → embed → BM25 and reports all stats."""
+    from unittest.mock import AsyncMock, patch
+
+    from src.api import routes
+
+    monkeypatch.setattr(routes, "_reprocess_jobs", {})
+
+    with patch("src.summarization.deduplicator.run_deduplication") as mock_dedup:
+        mock_dedup.return_value = [Path("output/xss.md"), Path("output/sql.md")]
+        with patch("src.embedding.engine.EmbeddingEngine") as MockEngine:
+            instance = MockEngine.return_value
+            instance.generate_all = AsyncMock(return_value={"chunks": 7})
+            with patch("src.retrieval.bm25_index.BM25Index") as MockBM25:
+                b = MockBM25.return_value
+                b.build_from_output_dir.return_value = b
+                b.chunks = [1, 2, 3, 4]
+
+                await routes._run_reprocess_job("job_r", generate_questions=False)
+
+    job = routes._reprocess_jobs["job_r"]
+    assert job["status"] == "completed"
+    assert job["dedup_wrote"] == 2
+    assert job["embed_chunks"] == 7
+    assert job["bm25_chunks"] == 4
+    # questions stay off by default
+    assert instance.generate_all.await_args.kwargs["generate_questions"] is False

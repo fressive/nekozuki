@@ -14,7 +14,7 @@ indexes them for hybrid (BM25 + embedding) semantic search.
 - `uv run nekozuki missing-writeups [--sample N] [--save FILE]` — list writeups with no tricks yet (the same set `--fill-gaps` targets; `--save` writes the URLs)
 - `uv run nekozuki dedup-techniques [--dry-run] [--no-llm] [--name-threshold X] [--content-threshold Y] [--llm-content-jaccard Z] [--out DIR]` — merge near-duplicate canonical techniques (spelling/synonym variants) into one file; a real run backs up, rewrites `data/tricks` technique names, appends merged aliases to `data/technique_mapping.yaml`, and re-renders `output/*.md`
 - `uv run nekozuki dedup-tricks [--dry-run] [--no-embed] [--no-llm] [--embed-threshold X] [--llm-gray-lo Y] [--out DIR]` — Stage 2 trick dedup: lexical (free, deterministic) → embedding cosine (opt-in, ~$0.05) → LLM judge for gray-zone pairs (opt-in); a real run prunes merged-away tricks from `data/tricks` and re-renders `output/*.md`
-- `uv run nekozuki embed [--force]` — split technique files, generate questions, embed, build index
+- `uv run nekozuki embed [--force] [--questions]` — split technique files and embed chunks; question generation/embedding is OFF by default (`--questions` opts in; questions power the retrieval question-boost tiebreaker)
 - `uv run nekozuki query "natural language query"` — CLI RAG query
 - `uv run nekozuki serve --port 8000` — start the web UI + API
 
@@ -60,6 +60,10 @@ data.json → clean → batch → LLM extract → normalize → dedup → output
   manually (NOT the SDK's `messages.stream()` accumulator, which crashes on gateways
   that emit `thinking` blocks). Text deltas are accumulated; thinking blocks are skipped.
   `LLM_MAX_TOKENS` is the per-request OUTPUT budget and is clamped to 64k.
+- **Concurrency defaults = 8** — both the background summarize job (`/api/summarize/start`,
+  via `LLM_MAX_CONCURRENCY`) and the background embed job (`/api/reprocess`, via
+  `EMBEDDING_MAX_CONCURRENCY`) default to 8 concurrent requests; override per-command
+  with `--concurrency` or set the env vars.
 - **Canonical technique mapping** — `src/summarization/normalizer.py` maps variants to a
   single file (e.g. blind/time/union/error sqli → `sql_injection`). New names are
   auto-discovered and saved to `data/technique_mapping.yaml`.

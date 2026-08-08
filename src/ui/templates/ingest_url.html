@@ -38,8 +38,11 @@
 
 <section class="card">
     <h2>Search index</h2>
-    <p class="muted">After adding writeups, rebuild the BM25 keyword index so new tricks are searchable (fast — no embedding).</p>
-    <button class="btn btn-start" onclick="rebuildIndex(event)">Rebuild BM25 index</button>
+    <p class="muted">Adding writeups only saves tricks to the pipeline. Run these when ready (processes all accumulated tricks at once):</p>
+    <div class="controls">
+        <button class="btn btn-start" onclick="reprocessAll(event)">Reprocess all (dedup + embed + BM25)</button>
+        <button class="btn" onclick="rebuildIndex(event)">Rebuild BM25 index</button>
+    </div>
     <div id="index-status" style="margin-top:0.6rem"></div>
 </section>
 {% endblock %}
@@ -120,11 +123,11 @@ async function pollIngest(jobId, statusEl, resultEl) {
         return;
     }
 
-    const tricks = data.tricks || [];
-    statusEl.innerHTML = `<p>Done. Extracted <strong>${data.total || tricks.length}</strong> trick(s), re-deduped ` +
-        `<strong>${data.dedup_wrote || 0}</strong> output files, embedded ` +
-        `<strong>${data.embed_chunks || 0}</strong> chunks into Chroma, and rebuilt BM25 ` +
-        `(<strong>${data.bm25_chunks || 0}</strong> chunks). Search is ready.</p>`;
+        const tricks = data.tricks || [];
+    statusEl.innerHTML = `<p>Done. Extracted <strong>${data.total || tricks.length}</strong> trick(s) and saved them ` +
+        `to the pipeline. Dedup + search index are not run automatically — trigger ` +
+        `<code>nekozuki dedup-tricks</code> and <code>nekozuki embed</code> when ready ` +
+        `(or the rebuild-index button below).</p>`;
 
     if (!tricks.length) {
         resultEl.innerHTML = '<p>No tricks extracted from this writeup.</p>';
@@ -142,6 +145,38 @@ async function pollIngest(jobId, statusEl, resultEl) {
             ${t.key_code ? `<pre><code>${escapeHtml(t.key_code)}</code></pre>` : ''}
             ${t.example ? `<p><strong>Example:</strong> <code>${escapeHtml(t.example)}</code></p>` : ''}
         </div>`).join('');
+}
+
+async function reprocessAll(ev) {
+    const statusEl = document.getElementById('index-status');
+    statusEl.innerHTML = '<p>Reprocessing pipeline (dedup + embed + BM25 can take a few minutes)…</p>';
+    try {
+        const resp = await fetch('/api/reprocess', {method: 'POST'});
+        const data = await resp.json();
+        if (data.status === 'queued') {
+            pollReprocess(data.job_id, statusEl);
+        } else {
+            statusEl.innerHTML = `<p class="error">${escapeHtml(data.detail || 'unknown')}</p>`;
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<p class="error">Reprocess failed: ${escapeHtml(e)}</p>`;
+    }
+}
+
+async function pollReprocess(jobId, statusEl) {
+    const resp = await fetch(`/api/reprocess/status/${jobId}`);
+    const data = await resp.json();
+    if (data.status === 'queued') {
+        setTimeout(() => pollReprocess(jobId, statusEl), 2000);
+        return;
+    }
+    if (data.status === 'failed') {
+        statusEl.innerHTML = `<p class="error">Reprocess failed: ${escapeHtml(data.error)}</p>`;
+        return;
+    }
+    statusEl.innerHTML = `<p>Done. Re-deduped <strong>${data.dedup_wrote}</strong> output files, embedded ` +
+        `<strong>${data.embed_chunks}</strong> chunks into Chroma, rebuilt BM25 ` +
+        `(<strong>${data.bm25_chunks}</strong> chunks). Search is ready.</p>`;
 }
 
 async function rebuildIndex(ev) {
