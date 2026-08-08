@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Login{% endblock %}
+{% block content %}
+<h1>Login</h1>
+
+<section class="card">
+    <p class="muted">This area requires the admin password. Search is available without logging in.</p>
+    <form onsubmit="doLogin(event)">
+        <input type="password" id="password" placeholder="Admin password" required autofocus style="flex:1">
+        <button type="submit" class="btn btn-start">Log in</button>
+    </form>
+    <p id="login-status" class="muted"></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+async function doLogin(ev) {
+    ev.preventDefault();
+    const pw = document.getElementById('password').value;
+    const statusEl = document.getElementById('login-status');
+    try {
+        const resp = await fetch('/api/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({password: pw}),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            const next = new URLSearchParams(location.search).get('next') || '/';
+            location.href = next;
+        } else {
+            statusEl.innerHTML = `<span class="error">${escapeHtml(data.detail || 'Login failed')}</span>`;
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<span class="error">Login failed: ${escapeHtml(e)}</span>`;
+    }
+}
+
+function escapeHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+{% endblock %}

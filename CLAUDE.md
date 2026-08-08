@@ -37,6 +37,14 @@ data.json → clean → batch → LLM extract → normalize → dedup → output
 - `src/retrieval/` — BM25 (tantivy-backed `bm25_index.py`), Chroma vector store (`vector_store.py`),
   online cross-encoder reranker (`reranker.py`), hybrid search (`hybrid.py`)
 - `src/api/` + `src/ui/` — FastAPI app, SSE progress, upload preview, embed preview.
+  **Auth:** set `AUTH_PASSWORD` in `.env` to require login for all non-search
+  endpoints/pages (`POST /api/login` sets an HttpOnly HMAC-signed cookie;
+  `Authorization: Bearer <token>` also accepted for scripts). The public surface
+  needs no login: `/api/health`, `/api/rag/query`, `/api/tricks/search`,
+  `/api/tricks/{id}`, `/api/techniques`, `/api/technique/{name}`, and the
+  `/search`/`/trick/`/`/technique/`/`/login` pages. Everything else returns 401
+  (API) or redirects to `/login` (pages). Empty `AUTH_PASSWORD` = auth disabled.
+  See `src/api/auth.py`.
   Coarse trick search: `GET /api/tricks/search?q=&limit=` returns lightweight
   `{id, technique_name, title, description}` over rendered `output/*.md` H2
   sections (fast in-memory scan, ~20-50ms, no rerank); `GET /api/tricks/{id}`

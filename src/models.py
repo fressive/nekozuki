@@ -136,3 +136,8 @@ class AddWriteupRequest(BaseModel):
     content: str = ""
     challenge_title: str = ""
     challenge_source: str = ""
+
+
+class LoginRequest(BaseModel):
+    """Body for POST /api/login."""
+    password: str = ""

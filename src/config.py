@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # Filtering
     min_content_length: int = int(os.getenv("MIN_CONTENT_LENGTH", "500"))
 
+    # Auth: admin (non-search) endpoints/pages require this password.
+    # Empty = auth disabled (everything open). Set AUTH_PASSWORD to enable login.
+    auth_password: str = os.getenv("AUTH_PASSWORD", "")
+
     # Technique-level dedup (`nekozuki dedup-techniques`)
     # Two canonical techniques merge on content when they share this many
     # identical trick-title token sets, or on name when fuzzy ratio >= the

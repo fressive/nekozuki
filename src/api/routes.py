@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -9,11 +10,12 @@ from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from src.api.auth import AUTH_COOKIE, AUTH_TOKEN_TTL, auth_enabled, issue_token
 from src.config import settings
-from src.models import AddWriteupRequest, ProgressEvent, QueryRequest, QueryResponse
+from src.models import AddWriteupRequest, LoginRequest, ProgressEvent, QueryRequest, QueryResponse
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,36 @@ job = SummarizeJob()
 async def health() -> dict:
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@router.post("/login")
+async def login(body: LoginRequest = Body(...)) -> JSONResponse:  # noqa: B008 (FastAPI injects)
+    """Log in with the admin password; sets an auth cookie and returns a token.
+
+    Returns 200 + sets the ``nekozuki_auth`` HttpOnly cookie (and a bearer token
+    in the body for scripts) on success; 401 on a wrong password. When
+    ``AUTH_PASSWORD`` is unset, auth is disabled and this returns immediately.
+    """
+    if not auth_enabled():
+        return JSONResponse({"status": "ok", "auth_disabled": True})
+
+    if not hmac.compare_digest(body.password, settings.auth_password):
+        raise HTTPException(status_code=401, detail="Invalid password")
+
+    token = issue_token()
+    resp = JSONResponse({"status": "ok", "token": token, "expires_in": AUTH_TOKEN_TTL})
+    resp.set_cookie(
+        AUTH_COOKIE, token, httponly=True, samesite="lax", max_age=AUTH_TOKEN_TTL
+    )
+    return resp
+
+
+@router.post("/logout")
+async def logout() -> JSONResponse:
+    """Clear the auth cookie."""
+    resp = JSONResponse({"status": "ok"})
+    resp.delete_cookie(AUTH_COOKIE)
+    return resp
 
 
 @router.post("/summarize/start")

@@ -47,30 +47,60 @@ class EmbeddingEngine:
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts via the OpenAI API.
 
-        Handles rate limits with simple retry on transient failures.
+        Batches at ``embedding_batch_size`` and handles two failure modes:
+        - gateway payload-size limit (4096-dim embeddings make the response
+          exceed the gateway's ~4MB grpc cap even at moderate batch sizes):
+          the batch is halved and retried recursively until it fits;
+        - transient network errors: simple backoff retry.
         """
         embeddings: list[list[float]] = []
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
+            embeddings.extend(await self._embed_batch(batch))
+        return embeddings
+
+    async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        """Embed one batch, halving on gateway payload-size errors."""
+        if not batch:
+            return []
+        try:
+            response = await self.client.embeddings.create(
+                model=self.model,
+                input=batch,
+                dimensions=settings.embedding_dimensions,
+            )
+            return [d.embedding for d in response.data]
+        except Exception as e:
+            # A payload-size rejection is deterministic: halve and retry, no backoff.
+            if self._is_payload_too_large(e) and len(batch) > 1:
+                mid = len(batch) // 2
+                logger.warning(
+                    "Embedding batch (%d texts) too large for gateway (%s); "
+                    "halving to %d",
+                    len(batch), e, mid,
+                )
+                return await self._embed_batch(batch[:mid]) + await self._embed_batch(batch[mid:])
+            # Transient failure: retry with backoff.
             for attempt in range(3):
+                logger.warning("Embedding retry %d: %s", attempt + 1, e)
+                await asyncio.sleep(1.5 * (attempt + 1))
                 try:
                     response = await self.client.embeddings.create(
                         model=self.model,
                         input=batch,
                         dimensions=settings.embedding_dimensions,
                     )
-                    # Keep response order aligned with input order
-                    batch_embeddings = [d.embedding for d in response.data]
-                    embeddings.extend(batch_embeddings)
-                    break
-                except Exception as e:
-                    if attempt == 2:
-                        logger.error("Failed to embed batch after 3 attempts: %s", e)
-                        raise
-                    logger.warning("Embedding retry %d: %s", attempt + 1, e)
-                    import asyncio
-                    await asyncio.sleep(1.5 * (attempt + 1))
-        return embeddings
+                    return [d.embedding for d in response.data]
+                except Exception as e2:  # noqa: BLE001 (re-raise after last retry)
+                    e = e2
+            logger.error("Failed to embed batch after retries: %s", e)
+            raise
+
+    @staticmethod
+    def _is_payload_too_large(e: Exception) -> bool:
+        """True if the gateway rejected the request as too large."""
+        msg = str(e)
+        return "larger than max" in msg or "ResourceExhausted" in msg or "too large" in msg
 
     async def embed(self, text: str) -> list[float]:
         """Embed a single text."""

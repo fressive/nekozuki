@@ -131,3 +131,53 @@ def test_vector_store_question_scores(tmp_path):
     )
     assert "sql_injection" in scores
     assert isinstance(scores["sql_injection"], float)
+
+
+@pytest.mark.asyncio
+async def test_embed_batch_halves_on_payload_too_large():
+    """embed_texts halves the batch when the gateway rejects it as too large."""
+    from types import SimpleNamespace
+
+    from src.embedding.engine import EmbeddingEngine
+
+    class PayloadTooLarge(Exception):
+        pass
+
+    class FakeClient:
+        def __init__(self, limit):
+            self.limit = limit
+            self.sizes: list[int] = []
+
+        class _Embeddings:
+            def __init__(self, client):
+                self._client = client
+
+            async def create(self, model, input, dimensions):
+                self._client.sizes.append(len(input))
+                if len(input) > self._client.limit:
+                    raise PayloadTooLarge(
+                        "grpc: trying to send message larger than max "
+                        "(6811105 vs. 4194304)"
+                    )
+                return SimpleNamespace(
+                    data=[
+                        SimpleNamespace(embedding=[0.1, 0.2])
+                        for _ in input
+                    ]
+                )
+
+        @property
+        def embeddings(self):
+            return self._Embeddings(self)
+
+    engine = EmbeddingEngine.__new__(EmbeddingEngine)
+    engine.client = FakeClient(limit=2)  # batches of >2 are "too large"
+    engine.model = "m"
+    engine.batch_size = 100
+
+    texts = ["t1", "t2", "t3", "t4", "t5"]
+    result = await engine.embed_texts(texts)
+    assert len(result) == len(texts)
+    # First attempt was the full oversized batch; it was recovered by halving
+    # instead of hard-failing (no exception propagates).
+    assert engine.client.sizes[0] == 5
