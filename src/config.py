@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     llm_max_batch_tokens: int = int(os.getenv("LLM_MAX_BATCH_TOKENS", "25000"))
     llm_timeout: float = float(os.getenv("LLM_TIMEOUT", "120"))
     llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
+    # Last-resort char cap for a SINGLE writeup whose LLM call failed. Content is
+    # never truncated by default; only if the untruncated call errors do we retry
+    # with the content capped here so it fits the model context. 0 = never truncate.
+    max_single_truncate_chars: int = int(os.getenv("MAX_SINGLE_TRUNCATE_CHARS", "500000"))
 
     # Embedding (OpenAI)
     embedding_api_key: str = os.getenv("OPENAI_API_KEY", "")

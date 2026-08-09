@@ -133,7 +133,7 @@ def create_writeup_batches(
     1. Group by category (similar content → similar techniques)
     2. Sort by challenge_source within each group
     3. Fill batches respecting token limits
-    4. Long writeups (>max_batch_tokens) are truncated
+    4. Long writeups are never truncated; oversized ones get their own batch
     """
     if writeups is None:
         writeups = load_writeups()
@@ -170,13 +170,8 @@ def create_writeup_batches(
         current_tokens = 0
 
         for w in group:
-            # Truncate very long content to fit within max_batch_tokens
-            content = w.cleaned_content
-            if len(content) > 10000:
-                content = content[:10000] + "\n...[truncated for length]"
-
             w_tokens = estimate_tokens(
-                _format_writeup_for_batch(w, content)
+                _format_writeup_for_batch(w)
             )
 
             # If single writeup exceeds max, it gets its own batch
@@ -213,8 +208,6 @@ def _format_writeup_for_batch(writeup: Writeup, content: str | None = None) -> s
     """Format a single writeup for inclusion in a batch prompt."""
     if content is None:
         content = writeup.cleaned_content
-        if len(content) > 10000:
-            content = content[:10000] + "\n...[truncated]"
 
     parts = [
         f"Source: {writeup.challenge_source}",
@@ -230,8 +223,6 @@ def format_batch_for_prompt(batch: list[Writeup]) -> str:
     parts = []
     for i, w in enumerate(batch):
         content = w.cleaned_content
-        if len(content) > 10000:
-            content = content[:10000] + "\n...[truncated]"
         parts.append(
             f"<writeup_{i+1}>\n"
             f"Source: {w.challenge_source}\n"

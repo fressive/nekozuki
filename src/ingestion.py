@@ -22,10 +22,8 @@ from src.summarization.prompts import build_extraction_prompt
 
 logger = logging.getLogger(__name__)
 
-# Default per-page fetch guardrails.
+# Default per-page fetch timeout.
 FETCH_TIMEOUT = 30.0
-# Cap the body we feed to the LLM so a single page cannot blow the context.
-MAX_INPUT_CHARS = 20000
 
 
 def fetch_url_content(url: str) -> str:
@@ -92,19 +90,38 @@ def _clean_and_check(content: str, source_label: str) -> str:
             f"Content in {source_label} is too short ({len(cleaned)} chars) to "
             "be a useful writeup."
         )
-    if len(cleaned) > MAX_INPUT_CHARS:
-        logger.warning(
-            "Truncating content from %d to %d chars", len(cleaned), MAX_INPUT_CHARS
-        )
-        cleaned = cleaned[:MAX_INPUT_CHARS] + "\n...[truncated for length]"
     return cleaned
 
 
 async def _extract_tricks_from_writeup(
     writeup: Writeup, llm: LLMClient | None
 ) -> list[Trick]:
-    """Run one writeup through LLM trick extraction (shared by all ingest paths)."""
+    """Run one writeup through LLM trick extraction (shared by all ingest paths).
+
+    Content is never truncated by default. If the untruncated LLM call fails,
+    the writeup is retried once with its content capped at
+    ``settings.max_single_truncate_chars`` (0.5M by default) as a last resort so
+    a single oversized page cannot permanently fail the ingest.
+    """
     llm = llm or LLMClient()
+    try:
+        return await _call_extraction(writeup, llm)
+    except Exception:
+        limit = settings.max_single_truncate_chars
+        if limit > 0 and len(writeup.cleaned_content) > limit:
+            logger.warning(
+                "LLM extraction failed; retrying with content truncated to %d chars",
+                limit,
+            )
+            writeup.cleaned_content = (
+                writeup.cleaned_content[:limit] + "\n...[truncated for length]"
+            )
+            return await _call_extraction(writeup, llm)
+        raise
+
+
+async def _call_extraction(writeup: Writeup, llm: LLMClient) -> list[Trick]:
+    """Build the extraction prompt from the writeup and parse the LLM response."""
     system_prompt, user_message = build_extraction_prompt(
         format_batch_for_prompt([writeup])
     )

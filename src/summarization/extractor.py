@@ -162,8 +162,6 @@ class TrickExtractor:
         checkpoint.failed_batches = []
         completed_count = start_idx
         failed_count = 0
-        max_retries = settings.llm_max_retries
-        retry_counts: dict[int, int] = {}
 
         try:
             while batch_queue or pending_set:
@@ -184,52 +182,43 @@ class TrickExtractor:
                     break
 
                 for task in done:
-                    batch_idx, batch_tricks, batch_tokens, succeeded = task.result()
+                    batch_idx, batch_tricks, batch_tokens, unresolved_urls = task.result()
 
-                    if not succeeded:
-                        attempts = retry_counts.get(batch_idx, 0) + 1
-                        if attempts <= max_retries:
-                            retry_counts[batch_idx] = attempts
-                            batch_queue.append(batch_idx)
-                            logger.warning(
-                                "Batch %d failed (attempt %d/%d), re-queued",
-                                batch_idx, attempts, max_retries,
+                    if unresolved_urls:
+                        failed_count += 1
+                        checkpoint.failed_batches.append({
+                            "batch_index": batch_idx,
+                            "unresolved_urls": unresolved_urls,
+                        })
+                        self.checkpoint_mgr.save(checkpoint)
+                        logger.error(
+                            "Batch %d: %d writeup(s) unresolved (%s), partial tricks saved",
+                            batch_idx, len(unresolved_urls), unresolved_urls,
+                        )
+                        # Still add partial tricks from the successful writeups
+                        if batch_tricks:
+                            tricks_accumulator.extend(batch_tricks)
+                            checkpoint.total_tricks_extracted += len(batch_tricks)
+                            checkpoint.total_tokens_used += batch_tokens
+                            checkpoint.processed_writeup_urls.extend(
+                                w.url for w in batches[batch_idx]
+                                if w.url not in unresolved_urls
                             )
-                            # Yield an event so the caller knows what's happening
-                            yield ProgressEvent(
-                                batch_index=batch_idx,
-                                total_batches=total_batches,
-                                tricks_extracted=checkpoint.total_tricks_extracted,
-                                tokens_used=checkpoint.total_tokens_used,
-                                completed_count=completed_count,
-                                progress_pct=round((completed_count / total_batches) * 100, 1) if total_batches > 0 else 0,
-                                status="running",
-                                message=f"Batch {batch_idx + 1} failed, retrying ({attempts}/{max_retries})",
-                            )
-                        else:
-                            failed_count += 1
-                            checkpoint.failed_batches.append({
-                                "batch_index": batch_idx,
-                                "retry_count": attempts,
-                            })
                             self.checkpoint_mgr.save(checkpoint)
-                            logger.error(
-                                "Batch %d failed permanently after %d attempts",
-                                batch_idx, attempts,
-                            )
-                            yield ProgressEvent(
-                                batch_index=batch_idx,
-                                total_batches=total_batches,
-                                tricks_extracted=checkpoint.total_tricks_extracted,
-                                tokens_used=checkpoint.total_tokens_used,
-                                completed_count=completed_count,
-                                progress_pct=round((completed_count / total_batches) * 100, 1) if total_batches > 0 else 0,
-                                status="running",
-                                message=f"Batch {batch_idx + 1} failed after {attempts} attempts, skipped",
-                            )
-                        continue  # don't count as completed
+                            self._save_tricks_batch(batch_tricks)
+                        yield ProgressEvent(
+                            batch_index=batch_idx,
+                            total_batches=total_batches,
+                            tricks_extracted=checkpoint.total_tricks_extracted,
+                            tokens_used=checkpoint.total_tokens_used,
+                            completed_count=completed_count,
+                            progress_pct=round((completed_count / total_batches) * 100, 1) if total_batches > 0 else 0,
+                            status="running",
+                            message=f"Batch {batch_idx + 1} had {len(unresolved_urls)} unresolved writeup(s)",
+                        )
+                        continue  # no re-queue; internal retries already exhausted
 
-                    # ---- Successful batch ----
+                    # ---- Successful batch (no unresolved writeups) ----
                     completed_count += 1
 
                     # Extend tricks accumulator
@@ -245,7 +234,7 @@ class TrickExtractor:
                     self.checkpoint_mgr.save(checkpoint)
 
                     # Save tricks incrementally
-                    self._save_tricks_batch(batch_idx, batch_tricks, batch_tokens)
+                    self._save_tricks_batch(batch_tricks)
 
                     yield ProgressEvent(
                         batch_index=batch_idx,
@@ -328,71 +317,137 @@ class TrickExtractor:
                 progress_pct=round((completed_count / total_batches) * 100, 1) if total_batches > 0 else 0,
             )
 
+    async def _attempt_batch(
+        self, writeups: list[Writeup]
+    ) -> tuple[list[dict], int]:
+        """Run one LLM extraction attempt on ``writeups``.
+
+        Raises on LLM/gateway errors; returns (tricks, tokens_used) on success.
+        """
+        writeup_text = format_batch_for_prompt(writeups)
+        system_prompt, user_message = build_extraction_prompt(writeup_text)
+
+        response = await self.llm.create_message(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            cache_system=True,
+        )
+
+        # If the LLM returned a bare list (common: the prompt asks for
+        # a JSON array), use it directly.
+        if isinstance(response, list):
+            tricks = response
+        elif isinstance(response, dict):
+            tricks = response.get("tricks", [])
+            if not tricks and "raw_content" in response:
+                # Parsing failed; try to recover tricks from raw text
+                tricks = self._extract_tricks_from_raw(response["raw_content"])
+        else:
+            tricks = []
+
+        # Attach source writeup URLs. The LLM reports source_indexes
+        # (writeup numbers within the batch, 1-based); only those writeups
+        # are credited with having exhibited the trick. If the field is
+        # missing/invalid, fall back to the whole batch (legacy behaviour).
+        for trick in tricks:
+            if not isinstance(trick, dict):
+                continue
+            idxs = trick.pop("source_indexes", None)
+            if isinstance(idxs, list) and idxs:
+                urls = []
+                for i in idxs:
+                    try:
+                        w = writeups[int(i) - 1]
+                        urls.append(w.url)
+                    except (ValueError, IndexError):
+                        continue
+                if urls:
+                    trick["source_writeups"] = urls
+                else:
+                    trick["source_writeups"] = []
+            else:
+                trick["source_writeups"] = [w.url for w in writeups]
+            trick["original_terms"] = [trick.get("technique_name", "")]
+
+        # Estimate tokens used
+        tokens_used = sum(len(w.cleaned_content) // 4 for w in writeups)
+
+        return tricks, tokens_used
+
     async def _process_batch(
         self, batch_idx: int, writeups: list[Writeup]
-    ) -> tuple[int, list[dict], int, bool]:
-        """Process a single batch of writeups through the LLM.
+    ) -> tuple[int, list[dict], int, list[str]]:
+        """Process a batch of writeups through the LLM with failure recovery.
+
+        Tiered strategy:
+        1. Retry the full batch up to ``llm_max_retries`` times (transient errors).
+        2. If still failing, reduce batch size: split in half and recurse.
+        3. A single isolated writeup that still fails is truncated to
+           ``max_single_truncate_chars`` (0.5M) as a last resort.
 
         Returns:
-            (batch_idx, tricks, tokens_used, succeeded)
+            (batch_idx, tricks, tokens_used, unresolved_urls)
+            ``unresolved_urls`` is empty when every writeup was successfully
+            extracted; non-empty means some writeups permanently failed.
         """
         async with self._semaphore:
+            return await self._process_batch_resolve(batch_idx, writeups)
+
+    async def _process_batch_resolve(
+        self, batch_idx: int, writeups: list[Writeup]
+    ) -> tuple[int, list[dict], int, list[str]]:
+        """Internal resolver: retry → halve → single-writeup truncation."""
+        # Tier 1: retry the full batch up to llm_max_retries
+        for attempt in range(1, settings.llm_max_retries + 1):
             try:
-                writeup_text = format_batch_for_prompt(writeups)
-                system_prompt, user_message = build_extraction_prompt(writeup_text)
-
-                response = await self.llm.create_message(
-                    system_prompt=system_prompt,
-                    user_message=user_message,
-                    cache_system=True,
-                )
-
-                # If the LLM returned a bare list (common: the prompt asks for
-                # a JSON array), use it directly.
-                if isinstance(response, list):
-                    tricks = response
-                elif isinstance(response, dict):
-                    tricks = response.get("tricks", [])
-                    if not tricks and "raw_content" in response:
-                        # Parsing failed; try to recover tricks from raw text
-                        tricks = self._extract_tricks_from_raw(response["raw_content"])
+                tricks, tokens = await self._attempt_batch(writeups)
+                return batch_idx, tricks, tokens, []
+            except Exception:
+                if attempt < settings.llm_max_retries:
+                    logger.warning(
+                        "Batch %d failed (attempt %d/%d), retrying",
+                        batch_idx, attempt, settings.llm_max_retries,
+                    )
                 else:
-                    tricks = []
+                    logger.warning(
+                        "Batch %d exhausted retries, reducing batch size",
+                        batch_idx,
+                    )
 
-                # Attach source writeup URLs. The LLM reports source_indexes
-                # (writeup numbers within the batch, 1-based); only those writeups
-                # are credited with having exhibited the trick. If the field is
-                # missing/invalid, fall back to the whole batch (legacy behaviour).
-                for trick in tricks:
-                    if not isinstance(trick, dict):
-                        continue
-                    idxs = trick.pop("source_indexes", None)
-                    if isinstance(idxs, list) and idxs:
-                        urls = []
-                        for i in idxs:
-                            try:
-                                w = writeups[int(i) - 1]
-                                urls.append(w.url)
-                            except (ValueError, IndexError):
-                                continue
-                        if urls:
-                            trick["source_writeups"] = urls
-                        else:
-                            trick["source_writeups"] = []
-                    else:
-                        trick["source_writeups"] = [w.url for w in writeups]
-                    trick["original_terms"] = [trick.get("technique_name", "")]
+        # Tier 2: reduce batch size by halving
+        if len(writeups) > 1:
+            mid = len(writeups) // 2
+            left = await self._process_batch_resolve(batch_idx, writeups[:mid])
+            right = await self._process_batch_resolve(batch_idx, writeups[mid:])
+            return (
+                batch_idx,
+                left[1] + right[1],
+                left[2] + right[2],
+                left[3] + right[3],
+            )
 
-                # Estimate tokens used
-                tokens_used = sum(len(w.cleaned_content) // 4 for w in writeups)
+        # Tier 3: single writeup — truncate to max_single_truncate_chars
+        w = writeups[0]
+        limit = settings.max_single_truncate_chars
+        if limit > 0 and len(w.cleaned_content) > limit:
+            logger.warning(
+                "Single writeup %s still failing, truncating to %d chars",
+                w.url, limit,
+            )
+            w.cleaned_content = (
+                w.cleaned_content[:limit] + "\n...[truncated for length]"
+            )
+            try:
+                tricks, tokens = await self._attempt_batch(writeups)
+                return batch_idx, tricks, tokens, []
+            except Exception:
+                pass
 
-                return batch_idx, tricks, tokens_used, True
-
-            except Exception as e:
-                logger.exception(
-                    "Batch %d failed: %s", batch_idx, e  # noqa: TRY401
-                )
-                return batch_idx, [], 0, False
+        unresolved = [w.url for w in writeups if w.url]
+        logger.error(
+            "Writeup(s) %s failed permanently", unresolved,
+        )
+        return batch_idx, [], 0, [u for u in unresolved if u]
 
     def _extract_tricks_from_raw(self, raw: str) -> list[dict]:
         """Fallback: try to extract trick objects from raw text."""
@@ -428,9 +483,9 @@ class TrickExtractor:
                 logger.info("Removed %s for fresh --force re-extraction", path)
 
     def _save_tricks_batch(
-        self, batch_idx: int, tricks: list[dict], tokens: int
+        self, tricks: list[dict]
     ) -> None:
-        """Save tricks from a batch to an intermediate file."""
+        """Save tricks from a batch to the JSONL accumulator file."""
         tricks_dir = settings.tricks_dir
         tricks_dir.mkdir(parents=True, exist_ok=True)
 

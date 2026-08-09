@@ -167,7 +167,7 @@ async def test_save_all_tricks_merges_existing_accumulator(tmp_path, monkeypatch
         {"technique_name": "sql_injection", "title": "New trick",
          "source_writeups": ["https://ctftime.org/writeup/3"]},
     ]
-    extractor._save_tricks_batch(0, new_tricks, 0)
+    extractor._save_tricks_batch(new_tricks)
     # ...and its in-memory accumulator only holds this session's tricks.
     # _save_all_tricks must rebuild from the full JSONL, not just this list.
     extractor._save_all_tricks(new_tricks)
