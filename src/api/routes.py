@@ -15,7 +15,15 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from src.api.auth import AUTH_COOKIE, AUTH_TOKEN_TTL, auth_enabled, issue_token
 from src.config import settings
-from src.models import AddWriteupRequest, LoginRequest, ProgressEvent, QueryRequest, QueryResponse
+from src.models import (
+    AddWriteupRequest,
+    LoginRequest,
+    ProgressEvent,
+    QueryRequest,
+    QueryResponse,
+    ResummarizeRequest,
+    Writeup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -760,6 +768,191 @@ async def get_ingest_status(job_id: str) -> dict:
     if job_id not in _url_ingestion_jobs:
         raise HTTPException(status_code=404, detail="Ingestion job not found")
     return _url_ingestion_jobs[job_id]
+
+
+# ---- Writeup re-summarize (re-extract tricks for one writeup) ----
+
+_resummarize_jobs: dict[str, dict] = {}
+
+
+def _load_writeup_by_url(url: str) -> tuple[Writeup, str]:
+    """Load a single writeup by URL from the cleaned cache or raw data.json.
+
+    Returns ``(writeup, source_label)``. The writeup carries cleaned content;
+    ``source_label`` is where it was found ("cache" or "data.json") for logs.
+    Raises ``KeyError`` if the URL is not found anywhere.
+    """
+    from src.processing.clean import clean_html_content
+
+    # Prefer the cleaned cache (small, already-parsed) over the 347MB raw file.
+    cache_path = Path(settings.cleaned_writeups_path)
+    if cache_path.exists():
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    item = json.loads(line)
+                    if item.get("url") == url:
+                        w = Writeup(**item)
+                        # Ensure cleaned content is present.
+                        if not w.cleaned_content and w.content:
+                            w.cleaned_content = clean_html_content(w.content)
+                        return w, "cache"
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Fallback to raw data.json
+    data_path = Path(settings.data_path)
+    if data_path.exists():
+        try:
+            with open(data_path, "r", encoding="utf-8") as f:
+                for item in json.load(f):
+                    if item.get("url") == url:
+                        w = Writeup(**item)
+                        w.cleaned_content = clean_html_content(w.content)
+                        return w, "data.json"
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    raise KeyError(url)
+
+
+def _remove_tricks_for_url(url: str) -> None:
+    """Drop every trick whose source_writeups includes ``url`` from the pipeline.
+
+    If a trick has multiple source writeups and only one matches the URL, the
+    URL is removed from the trick's list rather than dropping the whole trick.
+    Only tricks whose SOLE source is the re-summarized URL are removed entirely.
+
+    Rewrites both the JSONL accumulator (tricks.jsonl) and the consolidated
+    JSON array (tricks_all.json) in place, so a re-summarized writeup's old
+    tricks do not linger alongside the fresh extraction.
+    """
+    jsonl_path = Path(settings.tricks_dir) / "tricks.jsonl"
+    if not jsonl_path.exists():
+        return
+
+    kept: list[dict] = []
+    removed = 0
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                trick = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            srcs = trick.get("source_writeups", [])
+            if url in srcs:
+                if len(srcs) <= 1:
+                    # This writeup is the only source → remove the trick entirely.
+                    removed += 1
+                    continue
+                # Remove the URL from the list but keep the trick for its other
+                # source writeups' benefit.
+                trick["source_writeups"] = [s for s in srcs if s != url]
+            kept.append(trick)
+
+    if removed:
+        logger.info("Removed %d old trick(s) for %s", removed, url)
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            for trick in kept:
+                f.write(json.dumps(trick) + "\n")
+
+        all_path = Path(settings.tricks_dir) / "tricks_all.json"
+        with open(all_path, "w", encoding="utf-8") as f:
+            json.dump(kept, f, indent=2, ensure_ascii=False)
+    else:
+        logger.info("No old tricks to remove for %s", url)
+
+
+async def _run_resummarize_job(job_id: str, url: str) -> None:
+    """Re-extract tricks from a writeup URL and re-render output/*.md.
+
+    Steps: (1) load the writeup's cleaned content, (2) run single-writeup LLM
+    extraction (same path as ``/api/writeup/add``), (3) drop the writeup's old
+    tricks from the pipeline files, (4) append the fresh tricks, (5) re-run
+    dedup to re-render output/*.md. Embedding/BM25 are NOT updated here — the
+    user triggers ``/api/reprocess`` when ready.
+    """
+    try:
+        from src.ingestion import _extract_tricks_from_writeup, _append_trick_to_pipeline
+
+        writeup, source_label = _load_writeup_by_url(url)
+        logger.info("Re-summarizing %s (from %s)", url, source_label)
+
+        tricks = await _extract_tricks_from_writeup(writeup, None)
+
+        # Replace old tricks for this writeup with the fresh extraction.
+        _remove_tricks_for_url(url)
+        for t in tricks:
+            _append_trick_to_pipeline(t)
+
+        # Re-render output/*.md so the new tricks are visible.
+        from src.summarization.deduplicator import run_deduplication
+
+        written = await asyncio.to_thread(run_deduplication)
+
+        # Evict stale in-memory indexes (writeup↔trick, trick detail, sources).
+        _build_writeup_trick_index.cache_clear()
+        _build_writeup_metadata.cache_clear()
+        _load_tricks_index.cache_clear()
+        _trick_sources_map.cache_clear()
+
+        _resummarize_jobs[job_id] = {
+            "status": "completed",
+            "url": url,
+            "tricks": [t.model_dump() for t in tricks],
+            "total": len(tricks),
+            "dedup_wrote": len(written),
+        }
+    except KeyError:
+        _resummarize_jobs[job_id] = {
+            "status": "failed",
+            "url": url,
+            "error": f"Writeup URL not found in the data: {url}",
+        }
+    except Exception as e:
+        logger.exception("Writeup re-summarize failed: %s", e)  # noqa: TRY401
+        _resummarize_jobs[job_id] = {
+            "status": "failed",
+            "url": url,
+            "error": str(e),
+        }
+
+
+@router.post("/writeup/resummarize")
+async def resummarize_writeup(request: ResummarizeRequest) -> dict:
+    """Re-extract tricks from a single writeup by URL.
+
+    Loads the writeup's original content, runs it through the same LLM trick
+    extraction as the rest of the pipeline, replaces the writeup's old tricks
+    in tricks.jsonl/tricks_all.json with the fresh extraction, and re-runs
+    dedup to re-render output/*.md. Embedding/BM25 are not updated
+    automatically (run ``/api/reprocess`` when ready). Returns a job ID polled
+    via ``GET /api/writeup/resummarize-status/{job_id}``.
+    """
+    import uuid
+
+    url = request.url.strip()
+    if not url:
+        raise HTTPException(status_code=422, detail="url is required")
+
+    job_id = str(uuid.uuid4())
+    _resummarize_jobs[job_id] = {"status": "queued", "url": url}
+    asyncio.create_task(_run_resummarize_job(job_id, url))
+    return {"job_id": job_id, "status": "queued", "url": url}
+
+
+@router.get("/writeup/resummarize-status/{job_id}")
+async def resummarize_status(job_id: str) -> dict:
+    """Get the status of a writeup re-summarize job."""
+    if job_id not in _resummarize_jobs:
+        raise HTTPException(status_code=404, detail="Re-summarize job not found")
+    return _resummarize_jobs[job_id]
 
 
 # ---- BM25 index rebuild (background) ----

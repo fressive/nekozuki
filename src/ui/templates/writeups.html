@@ -19,12 +19,14 @@
 
 <section class="card" id="trick-detail" style="display:none">
     <h2 id="trick-detail-title">Tricks</h2>
+    <div id="resummarize-area" style="margin-bottom:1rem"></div>
     <div id="trick-detail-content"></div>
 </section>
 {% endblock %}
 {% block scripts %}
 <script>
 let writeupMeta = null; // cached writeup metadata
+let currentWriteupUrl = null; // url of the currently displayed writeup
 
 async function searchWriteups(ev) {
     ev.preventDefault();
@@ -51,13 +53,13 @@ async function searchWriteups(ev) {
 
     resultsEl.innerHTML = '<table><thead><tr><th>Challenge</th><th>CTF</th><th>Tricks</th></tr></thead><tbody>' +
         data.results.map(r => {
-            const link = r.trick_count > 0
+            const label = r.trick_count > 0
                 ? `<a href="#" onclick="showTricks('${escapeHtml(r.url)}');return false">${escapeHtml(r.title)}</a>`
-                : `<span class="muted">${escapeHtml(r.title)}</span>`;
+                : `<a href="#" onclick="showTricks('${escapeHtml(r.url)}');return false" class="muted" style="text-decoration:underline;text-decoration-style:dotted">${escapeHtml(r.title)}</a>`;
             return `<tr>
-            <td>${link}</td>
+            <td>${label}</td>
             <td>${escapeHtml(r.source)}</td>
-            <td>${r.trick_count > 0 ? r.trick_count : '<span class="muted">—</span>'}</td>
+            <td>${r.trick_count > 0 ? r.trick_count : '<span class="muted">0</span>'}</td>
         </tr>`}).join('') + '</tbody></table>';
     listEl.style.display = 'block';
 }
@@ -66,16 +68,28 @@ async function showTricks(url) {
     const detailEl = document.getElementById('trick-detail');
     const titleEl = document.getElementById('trick-detail-title');
     const contentEl = document.getElementById('trick-detail-content');
+    const resummarizeArea = document.getElementById('resummarize-area');
 
     detailEl.style.display = 'none';
     titleEl.textContent = 'Loading...';
+    resummarizeArea.innerHTML = '';
+    currentWriteupUrl = url;
 
     const resp = await fetch(`/api/writeup/tricks?url=${encodeURIComponent(url)}`);
     const data = await resp.json();
     titleEl.textContent = `Tricks: ${escapeHtml(data.challenge_title)} (${escapeHtml(data.challenge_source)})`;
 
-    if (data.tricks.length === 0) {
-        contentEl.innerHTML = '<p class="muted">No tricks were extracted from this writeup — it may not have been in a successfully processed batch. Run <code>nekozuki summarize</code> to (re)process it.</p>';
+    // Show re-summarize button
+    const hasTricks = data.tricks.length > 0;
+    resummarizeArea.innerHTML = `
+        <button class="btn" onclick="resummarizeWriteup()" id="resummarize-btn">
+            ${hasTricks ? '🔄' : '✨'} ${hasTricks ? 'Re-summarize' : 'Summarize'} this writeup
+        </button>
+        <span id="resummarize-status" class="muted" style="margin-left:0.5rem"></span>
+    `;
+
+    if (!hasTricks) {
+        contentEl.innerHTML = '<p class="muted">No tricks were extracted from this writeup yet. Click the <strong>Summarize this writeup</strong> button above to run the LLM extraction on it now.</p>';
         detailEl.style.display = 'block';
         return;
     }
@@ -90,6 +104,70 @@ async function showTricks(url) {
         </div>`).join('');
     detailEl.style.display = 'block';
     detailEl.scrollIntoView({behavior: 'smooth'});
+}
+
+async function resummarizeWriteup() {
+    const btn = document.getElementById('resummarize-btn');
+    const statusEl = document.getElementById('resummarize-status');
+    if (!currentWriteupUrl) return;
+
+    btn.disabled = true;
+    statusEl.textContent = 'Starting re-summarization...';
+
+    try {
+        const resp = await fetch('/api/writeup/resummarize', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url: currentWriteupUrl}),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            statusEl.textContent = `Error: ${data.detail || data.error || resp.statusText}`;
+            btn.disabled = false;
+            return;
+        }
+        statusEl.textContent = 'Re-summarizing... (polling for completion)';
+        pollResummarizeJob(data.job_id);
+    } catch (err) {
+        statusEl.textContent = `Error: ${err.message}`;
+        btn.disabled = false;
+    }
+}
+
+async function pollResummarizeJob(jobId) {
+    const statusEl = document.getElementById('resummarize-status');
+    const btn = document.getElementById('resummarize-btn');
+
+    let attempts = 0;
+    const maxAttempts = 120; // 2 minutes at 1s interval
+
+    while (attempts < maxAttempts) {
+        attempts++;
+        try {
+            const resp = await fetch(`/api/writeup/resummarize-status/${jobId}`);
+            const data = await resp.json();
+            if (data.status === 'completed') {
+                statusEl.innerHTML = `✅ Re-summarized: ${data.total} trick(s) extracted, ${data.dedup_wrote} technique file(s) updated. ` +
+                    `<a href="#" onclick="showTricks('${escapeHtml(currentWriteupUrl)}');return false">Refresh view</a>`;
+                btn.disabled = false;
+                return;
+            }
+            if (data.status === 'failed') {
+                statusEl.textContent = `❌ Failed: ${data.error}`;
+                btn.disabled = false;
+                return;
+            }
+            // Still running — wait and check again
+            statusEl.textContent = `Re-summarizing... (${attempts}s)`;
+            await new Promise(r => setTimeout(r, 1000));
+        } catch (err) {
+            statusEl.textContent = `Poll error: ${err.message}`;
+            btn.disabled = false;
+            return;
+        }
+    }
+    statusEl.textContent = '⚠️ Timed out waiting for re-summarization. Check the server logs.';
+    btn.disabled = false;
 }
 
 function escapeHtml(str) {

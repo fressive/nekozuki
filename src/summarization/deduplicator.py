@@ -11,11 +11,26 @@ from collections import defaultdict
 from pathlib import Path
 from typing import ClassVar
 
+from pydantic import ValidationError
+
 from src.config import settings
 from src.models import Trick
 from src.summarization.normalizer import TechniqueNormalizer
 
 logger = logging.getLogger(__name__)
+
+# Trick fields that must be lists. The LLM occasionally emits `null` for these
+# (instead of an empty list); coerce to [] on load so Pydantic validation
+# doesn't reject the whole trick.
+_LIST_FIELDS = ("conditions", "implementation_steps", "detection_signs")
+
+
+def _coerce_trick_dict(item: dict) -> dict:
+    """Return a copy of ``item`` with list fields defaulted from ``None``."""
+    for key in _LIST_FIELDS:
+        if item.get(key) is None:
+            item[key] = []
+    return item
 
 
 class TrickDeduplicator:
@@ -51,9 +66,9 @@ class TrickDeduplicator:
                     continue
                 try:
                     data = json.loads(line)
-                    trick = Trick(**data)
+                    trick = Trick(**_coerce_trick_dict(data))
                     tricks.append(trick)
-                except (json.JSONDecodeError, TypeError) as e:
+                except (json.JSONDecodeError, ValidationError, TypeError) as e:
                     logger.warning("Skipping malformed trick line: %s", e)
 
         logger.info("Loaded %d raw tricks", len(tricks))
@@ -82,8 +97,8 @@ class TrickDeduplicator:
             tricks = []
             for item in data:
                 try:
-                    tricks.append(Trick(**item))
-                except (json.JSONDecodeError, TypeError) as e:
+                    tricks.append(Trick(**_coerce_trick_dict(item)))
+                except (json.JSONDecodeError, ValidationError, TypeError) as e:
                     logger.warning("Skipping malformed trick: %s", e)
             logger.info("Loaded %d raw tricks from %s", len(tricks), tricks_path)
             return tricks
@@ -97,8 +112,8 @@ class TrickDeduplicator:
             if not line:
                 continue
             try:
-                tricks.append(Trick(**json.loads(line)))
-            except (json.JSONDecodeError, TypeError) as e:
+                tricks.append(Trick(**_coerce_trick_dict(json.loads(line))))
+            except (json.JSONDecodeError, ValidationError, TypeError) as e:
                 logger.warning("Skipping malformed trick line: %s", e)
         logger.info("Loaded %d raw tricks from %s (JSONL)", len(tricks), tricks_path)
         return tricks

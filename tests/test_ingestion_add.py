@@ -138,3 +138,124 @@ async def test_reprocess_job_runs_full_pipeline(monkeypatch):
     assert job["bm25_chunks"] == 4
     # questions stay off by default
     assert instance.generate_all.await_args.kwargs["generate_questions"] is False
+
+
+@pytest.mark.asyncio
+async def test_resummarize_job_replaces_tricks_and_runs_dedup(monkeypatch, tmp_path):
+    """The resummarize job loads the writeup, extracts tricks, replaces old
+    tricks in the pipeline, re-runs dedup, and evicts in-memory caches."""
+    from src.api import routes
+
+    monkeypatch.setattr(routes, "_resummarize_jobs", {})
+
+    # 1. Fake the writeup lookup.
+    fake_writeup = Writeup(
+        url="https://example.com/old-writeup",
+        challenge_title="Old Challenge",
+        challenge_name="old-challenge",
+        cleaned_content="Some writeup content about exploiting a vulnerability.",
+    )
+    monkeypatch.setattr(routes, "_load_writeup_by_url", lambda url: (fake_writeup, "test"))
+
+    # 2. Capture the trick that extraction produces.
+    class FakeLLM:
+        async def create_message(self, **kwargs):
+            return {"tricks": [{
+                "technique_name": "sqli",
+                "title": "Tautology login bypass",
+                "category": "web",
+                "description": "Inject OR 1=1.",
+                "source_writeups": [],
+            }]}
+
+    fake_llm = FakeLLM()
+    from src.ingestion import _extract_tricks_from_writeup
+
+    async def fake_extract(writeup, llm):
+        return await _extract_tricks_from_writeup(writeup, fake_llm)
+
+    monkeypatch.setattr("src.ingestion._extract_tricks_from_writeup", fake_extract)
+
+    # 3. Fake dedup to return a controlled value.
+    from unittest.mock import patch
+
+    with patch("src.summarization.deduplicator.run_deduplication") as mock_dedup:
+        mock_dedup.return_value = [Path("output/sqli.md")]
+
+        # 4. Run the resummarize job.
+        await routes._run_resummarize_job("job_rs", "https://example.com/old-writeup")
+
+    # 5. Verify the result.
+    job = routes._resummarize_jobs["job_rs"]
+    assert job["status"] == "completed"
+    assert job["total"] == 1
+    assert job["dedup_wrote"] == 1
+    assert job["tricks"][0]["technique_name"] == "sqli"
+    assert job["url"] == "https://example.com/old-writeup"
+
+
+@pytest.mark.asyncio
+async def test_resummarize_job_fails_on_missing_url(monkeypatch):
+    """The resummarize job reports failure when the writeup URL is not found."""
+    from src.api import routes
+
+    monkeypatch.setattr(routes, "_resummarize_jobs", {})
+
+    def raise_keyerror(url):
+        msg = f"Writeup URL not found in the data: {url}"
+        raise KeyError(msg)
+
+    monkeypatch.setattr(routes, "_load_writeup_by_url", raise_keyerror)
+
+    await routes._run_resummarize_job("job_missing", "https://example.com/nonexistent")
+
+    job = routes._resummarize_jobs["job_missing"]
+    assert job["status"] == "failed"
+    assert "not found" in job["error"]
+
+
+@pytest.mark.asyncio
+async def test_remove_tricks_for_url_preserves_multi_source_tricks(monkeypatch, tmp_path):
+    """_remove_tricks_for_url only removes tricks whose sole source is the URL;
+    tricks with multiple sources keep the other sources after the URL is removed."""
+    from src.api import routes
+    from src.config import settings
+
+    # Create a temporary tricks directory and file.
+    tricks_dir = tmp_path / "tricks"
+    tricks_dir.mkdir()
+    monkeypatch.setattr("src.config.settings.tricks_dir", tricks_dir)
+
+    jsonl_path = tricks_dir / "tricks.jsonl"
+    with open(jsonl_path, "w") as f:
+        # Trick 1: sole source = "https://example.com/target" → should be removed
+        f.write('{"title":"T1","source_writeups":["https://example.com/target"]}\n')
+        # Trick 2: multi-source including target → target removed, trick kept
+        f.write('{"title":"T2","source_writeups":["https://example.com/target","https://example.com/other"]}\n')
+        # Trick 3: no target → kept as-is
+        f.write('{"title":"T3","source_writeups":["https://example.com/unrelated"]}\n')
+        # Trick 4: empty source_writeups → kept
+        f.write('{"title":"T4","source_writeups":[]}\n')
+        # Trick 5: malformed → kept (but becomes a parse error that's skipped)
+        f.write('not valid json\n')
+
+    routes._remove_tricks_for_url("https://example.com/target")
+
+    # Re-read the file and check what's left.
+    with open(jsonl_path) as f:
+        lines = [l.strip() for l in f if l.strip()]
+
+    # T1 should be gone (only source was target).
+    assert not any("T1" in l for l in lines), "T1 should have been removed"
+
+    # T2 should remain with target removed from its source_writeups.
+    t2_line = [l for l in lines if "T2" in l]
+    assert len(t2_line) == 1
+    import json
+    t2 = json.loads(t2_line[0])
+    assert "https://example.com/target" not in t2["source_writeups"]
+    assert "https://example.com/other" in t2["source_writeups"]
+
+    # T3 and T4 should be untouched.
+    assert any("T3" in l for l in lines)
+    assert any("T4" in l for l in lines)

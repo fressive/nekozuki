@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Writeup(BaseModel):
@@ -33,6 +33,14 @@ class Trick(BaseModel):
     source_writeups: list[str] = Field(default_factory=list)
     original_terms: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    @field_validator("conditions", "implementation_steps", "detection_signs", mode="before")
+    @classmethod
+    def _coerce_none_to_empty(cls, v: object) -> object:
+        """The LLM occasionally emits ``null`` for list fields; coerce to ``[]``."""
+        if v is None:
+            return []
+        return v
 
 
 class TrickBatch(BaseModel):
@@ -141,3 +149,11 @@ class AddWriteupRequest(BaseModel):
 class LoginRequest(BaseModel):
     """Body for POST /api/login."""
     password: str = ""
+
+
+class ResummarizeRequest(BaseModel):
+    """Body for POST /api/writeup/resummarize: re-extract tricks from a writeup.
+
+    ``url`` is the writeup URL identifying which writeup to re-summarize.
+    """
+    url: str = ""
