@@ -62,7 +62,7 @@ async function runQuickSearch(ev) {
                     <a href="/trick/${encodeURIComponent(r.id)}" class="result-technique">${escapeHtml(r.title)}</a>
                     <span class="tag">${escapeHtml(r.technique_name)}</span>
                 </div>
-                <div class="result-content"><div class="md-text">${escapeHtml(r.description || '')}</div></div>
+                <div class="result-content">${renderMarkdown(r.content || r.description || '')}</div>
             </div>`).join(''), elapsed, `${data.results.length} results`);
     } catch (e) {
         setResults(`<p class="error">Search failed: ${escapeHtml(e)}</p>`, 0);

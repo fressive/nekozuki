@@ -351,7 +351,9 @@ def search_tricks_in(tricks: list[dict], q: str, limit: int = 20) -> list[dict]:
 
     Scores each trick by query-token overlap (title weighted higher, plus a
     bonus when the whole query is a title substring) and returns the top
-    ``limit`` results as ``{id, technique_name, title, description}``.
+    ``limit`` results with the FULL trick content — description, conditions,
+    implementation steps, key code, example, detection signs, and the raw
+    markdown section — so callers don't need a second detail request.
     """
     tokens = set(re.findall(r"\w+", q.lower())) if q else set()
     q_lower = q.lower().strip() if q else ""
@@ -378,7 +380,14 @@ def search_tricks_in(tricks: list[dict], q: str, limit: int = 20) -> list[dict]:
             "id": trick["id"],
             "technique_name": trick["technique_name"],
             "title": trick["title"],
-            "description": (trick.get("description") or "")[:300],
+            "description": trick.get("description") or "",
+            "conditions": trick.get("conditions", []),
+            "implementation_steps": trick.get("implementation_steps", []),
+            "key_code": trick.get("key_code"),
+            "example": trick.get("example"),
+            "example_challenge": trick.get("example_challenge"),
+            "detection_signs": trick.get("detection_signs", []),
+            "content": trick.get("content", ""),
         })
     return results
 
@@ -408,10 +417,12 @@ def _trick_sources_map() -> dict[tuple[str, str], list[str]]:
 
 @router.get("/tricks/search")
 async def search_tricks(q: str = "", limit: int = 20) -> dict:
-    """Coarse search over rendered tricks; returns id/title/description.
+    """Coarse search over rendered tricks; returns the FULL trick content.
 
-    Fast keyword scan (no rerank) — the lightweight result list the UI can show
-    before fetching full details via ``GET /api/tricks/{id}``.
+    Fast keyword scan (no rerank). Each result carries all parsed fields
+    (description, conditions, implementation_steps, key_code, example,
+    detection_signs) plus the raw markdown ``content`` section, so no
+    follow-up ``GET /api/tricks/{id}`` is needed to read a result.
     """
     if not q.strip():
         raise HTTPException(status_code=422, detail="q parameter is required")
@@ -578,7 +589,7 @@ async def get_writeup_tricks(url: str = "") -> dict:
             "technique_name": t.get("technique_name", ""),
             "title": t.get("title", ""),
             "category": t.get("category", ""),
-            "description": t.get("description", "")[:200],
+            "description": t.get("description", ""),
             "confidence": t.get("confidence", 0),
             "key_code": t.get("key_code", ""),
             "example": t.get("example", ""),

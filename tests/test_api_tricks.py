@@ -72,7 +72,11 @@ def test_search_finds_by_title_and_description():
     assert res[0]["title"] == "Authentication Bypass via Tautology"
     assert "id" in res[0]
     assert "description" in res[0]
-    assert "content" not in res[0], "coarse results must be lightweight"
+    # Full content is returned so no detail request is needed.
+    assert "conditions" in res[0] and res[0]["conditions"]
+    assert "implementation_steps" in res[0] and res[0]["implementation_steps"]
+    assert "key_code" in res[0]
+    assert "content" in res[0] and res[0]["content"]
 
     res2 = search_tricks_in(tricks, "sleep time", limit=5)
     assert res2 and res2[0]["title"] == "Blind SQLi via time delay"

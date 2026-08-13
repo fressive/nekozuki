@@ -173,5 +173,15 @@ async function pollResummarizeJob(jobId) {
 function escapeHtml(str) {
     return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
+// Auto-load a writeup if the URL has a ?url= parameter.
+window.addEventListener('DOMContentLoaded', () => {
+    const params = new URLSearchParams(window.location.search);
+    const url = params.get('url');
+    if (url) {
+        document.getElementById('q').value = '';
+        showTricks(url);
+    }
+});
 </script>
 {% endblock %}

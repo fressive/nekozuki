@@ -65,7 +65,10 @@
         <h2>Source writeups ({{ detail.source_writeups|length }})</h2>
         <ul>
             {% for u in detail.source_writeups %}
-            <li><a href="{{ u }}" target="_blank" rel="noopener">{{ u }}</a></li>
+            <li style="margin-bottom:0.3rem">
+                <a href="{{ u }}" target="_blank" rel="noopener">{{ u }}</a>
+                <a href="/writeups?url={{ u | urlencode }}" class="tag" style="margin-left:0.4rem;text-decoration:none">📄 Local</a>
+            </li>
             {% endfor %}
         </ul>
     </section>
